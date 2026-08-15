@@ -39,6 +39,14 @@ All notable changes to this project are documented in this file.
   extension and masked it). Now reads `ConnectInfo<SocketAddr>` (with
   fallback).
 
+## [0.2.1] - 2026-08-15
+
+### Fixed
+
+- No-password warning banner on non-localhost binds no longer consumes the
+  whole page: moved inside the content area, shown only when no admin
+  password is set, with a direct "Set a password" link to Settings.
+
 ## [Unreleased]
 
 ## [0.1.1] - 2026-08-15
