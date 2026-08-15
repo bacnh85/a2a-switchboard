@@ -5,6 +5,11 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+pub struct ChannelQuery {
+    pub name: String,
+}
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,26 +131,30 @@ pub struct EnvelopeHead {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /channel — SSE: peer holds this open to receive proxied requests.
+/// GET /channel?name=<peer> — SSE: peer holds this open to receive proxied
+/// requests. The name is REQUIRED: with a shared token, several peers share
+/// one fingerprint, so fingerprint-only lookup would bind the wrong peer.
 pub async fn channel_open(
     State(app): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ChannelQuery>,
     headers: HeaderMap,
 ) -> axum::response::Response {
     let Some(token) = crate::auth::extract_token(&headers) else {
         return crate::auth::unauthorized();
     };
     let fp = fingerprint(&token);
-    // Resolve the peer by token fingerprint; must be Accepted to receive traffic.
     let (name, state) = {
         let inner = app.inner.read().await;
-        match inner.peers.iter().find(|p| p.fingerprint == fp) {
-            Some(p) => (p.name.clone(), p.state),
-            None => return (StatusCode::NOT_FOUND, "no peer registered for this token").into_response(),
+        match inner.peers.iter().find(|p| p.name == q.name) {
+            Some(p) if p.fingerprint == fp => (p.name.clone(), p.state),
+            Some(_) => return (StatusCode::FORBIDDEN, "peer name does not match this token").into_response(),
+            None => return (StatusCode::NOT_FOUND, "unknown peer").into_response(),
         }
     };
     if state != PeerState::Accepted {
         return (StatusCode::FORBIDDEN, "peer is not accepted").into_response();
     }
+
 
     let (rx, tx) = app.channels.bind(&name);
     tracing::info!("channel open: {name}");
@@ -179,10 +188,13 @@ pub async fn channel_open(
     sse.into_response()
 }
 
-/// POST /channel/response/{id} — peer posts the answer for a delivered request.
+/// POST /channel/response/{id}?name=<peer> — peer posts the answer for a
+/// delivered request. `name` is required (shared-token peers share one
+/// fingerprint; the id→peer binding must match the DECLARED name).
 pub async fn channel_response(
     State(app): State<AppState>,
     crate::auth::ClientIp(ip): crate::auth::ClientIp,
+    axum::extract::Query(q): axum::extract::Query<ChannelQuery>,
     Path(id): Path<u64>,
     headers: HeaderMap,
     axum::Json(resp): axum::Json<RespEnvelope>,
@@ -194,18 +206,23 @@ pub async fn channel_response(
         return crate::auth::unauthorized();
     };
     let fp = fingerprint(&token);
-    let name = {
+    // Verify the DECLARED name matches this token's fingerprint.
+    let name_ok = {
         let inner = app.inner.read().await;
-        match inner.peers.iter().find(|p| p.fingerprint == fp) {
-            Some(p) => p.name.clone(),
-            None => return (StatusCode::NOT_FOUND, "no peer registered for this token").into_response(),
+        match inner.peers.iter().find(|p| p.name == q.name) {
+            Some(p) => p.fingerprint == fp,
+            None => false,
         }
     };
+    if !name_ok {
+        return (StatusCode::FORBIDDEN, "peer name does not match this token").into_response();
+    }
     if resp.id != id {
         return (StatusCode::UNPROCESSABLE_ENTITY, "id mismatch").into_response();
     }
-    // respond() checks the id→peer binding internally.
-    let ok = app.channels.respond(&name, resp);
+    // respond() checks the id→peer binding internally (responder must be the
+    // same peer the request was delivered to).
+    let ok = app.channels.respond(&q.name, resp);
     if ok {
         StatusCode::OK.into_response()
     } else {

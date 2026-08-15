@@ -16,6 +16,18 @@ pub fn spawn(app: AppState, interval_sec: u64) {
                 .map(|p| (p.name.clone(), p.url.clone()))
                 .collect();
             for (name, base) in urls {
+                // Channel peers may be unreachable by URL by construction —
+                // a live channel IS the health signal.
+                if app.channels.has(&name) {
+                    let mut inner = app.inner.write().await;
+                    if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
+                        p.healthy = Some(true);
+                        p.last_seen = Some(now());
+                        p.last_error = None;
+                    }
+                    drop(inner);
+                    continue;
+                }
                 let target = format!("{}/.well-known/agent-card.json", base.trim_end_matches('/'));
                 match app.http.get(&target).timeout(std::time::Duration::from_secs(5)).send().await {
                     Ok(r) if r.status().is_success() => {

@@ -253,7 +253,7 @@ async fn channel_roundtrip_full() {
     assert!(String::from_utf8_lossy(&b).contains(r#""channel":false"#));
 
     // Open the channel as the peer (SSE).
-    let sse = router.clone().oneshot(req("GET", "/channel", Some(&boot), None)).await.unwrap();
+    let sse = router.clone().oneshot(req("GET", "/channel?name=fw", Some(&boot), None)).await.unwrap();
     assert_eq!(sse.status(), StatusCode::OK);
     let mut stream = sse.into_body().into_data_stream();
 
@@ -296,7 +296,7 @@ async fn channel_roundtrip_full() {
     });
     let r = router
         .clone()
-        .oneshot(req("POST", &format!("/channel/response/{id}"), Some(&boot), Some(&resp_json.to_string())))
+        .oneshot(req("POST", &format!("/channel/response/{id}?name=fw"), Some(&boot), Some(&resp_json.to_string())))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
