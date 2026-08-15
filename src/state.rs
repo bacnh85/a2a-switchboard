@@ -68,7 +68,10 @@ pub struct RateLimiter {
 impl RateLimiter {
     /// Fixed window: max requests per 60s sliding window bucket.
     pub fn allow(&self, key: &str, max: u32) -> bool {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let mut hits = self.hits.lock().unwrap();
         if hits.len() > 10_000 {
             hits.retain(|_, (w, _)| now - *w < 60);
@@ -103,7 +106,10 @@ pub struct App {
 pub type AppState = Arc<App>;
 
 pub fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 pub fn fingerprint(token: &str) -> String {
@@ -130,9 +136,17 @@ impl App {
         let inner = if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
             let p: Persisted = serde_json::from_str(&raw)?;
-            Inner { gateway_token: p.gateway_token, bootstrap_token: p.bootstrap_token, peers: p.peers }
+            Inner {
+                gateway_token: p.gateway_token,
+                bootstrap_token: p.bootstrap_token,
+                peers: p.peers,
+            }
         } else {
-            Inner { gateway_token: gen_token(), bootstrap_token: gen_token(), peers: Vec::new() }
+            Inner {
+                gateway_token: gen_token(),
+                bootstrap_token: gen_token(),
+                peers: Vec::new(),
+            }
         };
         let (log_tx, _) = broadcast::channel(256);
         let http = reqwest::Client::builder()
@@ -174,14 +188,17 @@ impl App {
             json.push('\n');
             use std::io::Write;
             if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true).append(true)
+                .create(true)
+                .append(true)
                 .open(self.data_dir.join("routing.jsonl"))
             {
                 let _ = f.write_all(json.as_bytes());
             }
         }
         let mut ring = self.log_ring.write().await;
-        if ring.len() >= RING_CAP { ring.pop_front(); }
+        if ring.len() >= RING_CAP {
+            ring.pop_front();
+        }
         ring.push_back(e.clone());
         let _ = self.log_tx.send(e);
     }

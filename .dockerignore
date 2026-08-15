@@ -1,0 +1,12 @@
+target/
+data/
+.git/
+.env*
+.pi/
+.serena/
+.agents/
+*.log
+Dockerfile*
+docker-compose*
+.github/
+docs/

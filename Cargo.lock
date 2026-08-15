@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "agent-gateway"
+name = "a2a-switchboard"
 version = "0.1.0"
 dependencies = [
  "anyhow",

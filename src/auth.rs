@@ -10,7 +10,10 @@ pub struct ClientIp(pub String);
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
     type Rejection = Infallible;
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
         let ip = parts
             .extensions
             .get::<SocketAddr>()
@@ -30,7 +33,10 @@ pub enum TokenKind {
 
 /// Extract bearer token from Authorization header or X-Gateway-Token.
 pub fn extract_token(headers: &HeaderMap) -> Option<String> {
-    if let Some(v) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+    if let Some(v) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
         if let Some(t) = v.strip_prefix("Bearer ") {
             return Some(t.trim().to_string());
         }

@@ -1,114 +1,112 @@
-# agent-gateway
+# a2a-switchboard
 
-Self-hosted **A2A (Agent2Agent) gateway** in Rust. Single static binary: peer
-admission control, token exchange, traffic brokering, admin UI with routing
-log and live communication graph.
+**Self-hosted A2A (Agent2Agent) switchboard — admit, route, and observe your agents.**
+
+A single Rust binary that brokers A2A traffic between agents the way an operator
+switchboard connects calls: agents wait at the board until **you** connect them.
+No config-file wrestling, no control plane — a live admin UI for admission,
+routing logs, and a communication graph.
 
 ```
-cargo run --release        # → http://127.0.0.1:9920
+Peer A ──┐                            ┌── Peer B (public URL)
+         ├── a2a-switchboard (you) ───┤
+Peer C ──┘                            └── Peer D (firewalled — reverse channel)
 ```
 
-## What it does
+## Why a switchboard instead of a gateway?
 
-- **Gateway API token** — peers authenticate with it; unknown peers land in a
-  **pending queue**, visible in the admin UI.
-- **Bootstrap token** — registrations presenting it are **auto-accepted**.
-- **Deny-by-default proxying** — traffic is only ever forwarded to *accepted*
-  peers' pinned URLs (`/peer/{name}/...`). No URL from a request body is ever
-  fetched (SSRF-safe by construction).
+`agentgateway` and similar projects solve **config-driven proxying for platform
+teams** — YAML, RBAC policies, LLM/MCP routing. This project solves
+**human-in-the-loop admission for self-hosters**: your agents (Pi, Hermes, any
+A2A client) register, wait in a pending queue, and YOU accept them — with
+tokens, a directory, live routing logs, and a communication graph in one binary.
+
+## Features
+
+- **Peer admission** — gateway token puts new peers in a pending queue;
+  bootstrap token auto-accepts; accept/reject/revoke from the admin UI.
+- **Token exchange** — peers authenticate with the gateway; the gateway
+  authenticates to each peer with their registered `upstream_token`.
+- **Proxy routing** — any A2A JSON-RPC call via `/peer/{name}/...`, deny-by-
+  default egress (only accepted peers' pinned URLs, no redirects).
+- **Reverse channels** — firewalled/NAT'd peers hold an outbound SSE connection;
+  the switchboard delivers requests down it and receives responses back. All
+  connections are peer-initiated — one open inbound port is enough.
 - **Directory as Agent Card** — `/.well-known/agent.json` (alias
-  `/.well-known/agent-card.json`) lists accepted peers; auth-aware:
-  capabilities/skills only with a valid token.
-- **Admin UI** (no auth by design, bind to localhost): dashboard, pending-peer
-  accept/reject, live routing log (SSE), communication graph (vis-network).
+  `agent-card.json`) lists accepted peers, auth-aware.
+- **Admin UI** — dashboard (connected/healthy counts), pending-peer queue,
+  live routing log (SSE), communication graph (vis-network).
+- **Zero-dep runtime** — rust-embed bakes the UI in; single 7MB static binary,
+  no Node, no CDN, no database.
 
 ## Quickstart
 
+### Docker (recommended)
+
 ```bash
-cargo build --release
-./target/release/agent-gateway
-# First run prints:
-#   gateway API token : agw_...
-#   bootstrap token   : agw_...
+docker run -d --name switchboard -p 9920:9920 -v ./data:/data \
+  ghcr.io/bacnh85/a2a-switchboard:latest
 ```
 
-### Register a peer (gateway token → pending)
+### Or the binary
+
+```bash
+cargo build --release        # or download from Releases
+./target/release/a2a-switchboard
+```
+
+First run prints the two tokens (also saved to `data/state.json` and shown in
+Settings):
+
+```
+gateway API token : agw_...
+bootstrap token   : agw_...
+```
+
+Open **http://127.0.0.1:9920** — that's the admin UI.
+
+### Register a peer (gateway token → pending queue)
 
 ```bash
 curl -X POST http://127.0.0.1:9920/register \
-  -H "Authorization: Bearer $GATEWAY_TOKEN" \
-  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GATEWAY_TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"hermes","url":"http://192.168.1.20:9900/",
-       "card": {...optional agent card...},
-       "upstream_token": "optional-token-gateway-uses-when-calling-this-peer"}'
+       "card":{...optional agent card...},
+       "upstream_token":"optional-token-gateway-uses-when-calling-this-peer"}'
 # → {"status":"registered","peer":"hermes","state":"pending"}
-# Accept it in the UI at http://127.0.0.1:9920/peers
 ```
 
-With the **bootstrap token** instead, the same call returns
-`"state":"accepted"` immediately.
+Accept it at http://127.0.0.1:9920/peers. With the **bootstrap token** the same
+call returns `"state":"accepted"` immediately.
 
-### Call a peer through the gateway
-
-Any A2A JSON-RPC call works — just point the client at the gateway path:
+### Call a peer through the switchboard
 
 ```bash
 curl -X POST http://127.0.0.1:9920/peer/hermes/ \
-  -H "Authorization: Bearer $GATEWAY_TOKEN" \
-  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $GATEWAY_TOKEN" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{...}}'
 ```
 
-### pi-a2a (Pi) peer config example
+## Documentation
 
-```jsonc
-{
-  "a2a": {
-    "peers": {
-      "gateway": { "url": "http://127.0.0.1:9920/peer/hermes", "auth": { "bearer": "<GATEWAY_TOKEN>" } }
-    }
-  }
-}
-```
+| Guide | What it covers |
+|---|---|
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker/compose/binary, TLS termination, firewall, systemd, backup |
+| [docs/INTEGRATION.md](docs/INTEGRATION.md) | Registration, directory, proxy, reverse-channel protocol, pi-a2a config |
+| [docs/SECURITY.md](docs/SECURITY.md) | Threat model, token classes, SSRF posture, known limitations |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Build, test, architecture, adding features, release checklist |
+| [CHANGELOG.md](CHANGELOG.md) | Version history |
 
-## Configuration
+## Comparison
 
-`config.toml` (optional) or env overrides:
+| | **a2a-switchboard** | agentgateway |
+|---|---|---|
+| Admission model | human-in-the-loop (pending queue, UI) | config/YAML-driven |
+| Deployment | single binary, self-hosted | config files, k8s/Gateway API |
+| Firewalled peers | reverse channel (built-in) | needs tunnels |
+| Admin UI | live: admission, log, graph | read-only explorer |
+| Scope | A2A only | A2A + MCP + LLM routing |
 
-| Key | Env | Default |
-|-----|-----|---------|
-| `server.bind` | `AGW_BIND` | `127.0.0.1:9920` |
-| `server.data_dir` | `AGW_DATA_DIR` | `data/` |
-| `server.heartbeat_sec` | `AGW_HEARTBEAT_SEC` | `30` |
+## License
 
-State: `data/state.json` (peers + tokens, atomic write). Routing log:
-`data/routing.jsonl` (append-only, metadata only — never message bodies).
-
-## Security model
-
-- Tokens compared in **constant time** (`subtle`).
-- Egress **only** to accepted peers' pinned URLs; redirects never followed.
-- URL scheme allowlist (http/https) at registration.
-- Per-IP rate limits: 20 req/min registration, 120 req/min proxy.
-- Routing log stores metadata only (src/dst/method/status/bytes/latency).
-- Admin UI is **unauthenticated by design** → default bind is `127.0.0.1`;
-  a warning banner + startup warning appear when bound wider. Put a TLS
-  terminator (Caddy/nginx) in front for remote access.
-
-### Known limitations (by design, v2 candidates)
-
-- One shared peer token ⇒ an accepted peer can impersonate another on the
-  wire. Attribution in the log is token-class level. Per-peer tokens are the
-  planned v2 (`peerTokens` support already exists in pi-a2a clients).
-- No admin authentication.
-- Plain HTTP; terminate TLS externally.
-
-## Development
-
-```bash
-cargo test               # 8 integration tests: admission, proxy, SSE, rate limit
-cargo clippy --all-targets -- -D warnings
-```
-
-Stack: axum, tokio, askama (compiled templates), rust-embed (htmx, SSE ext,
-vis-network vendored — zero runtime CDN), subtle, reqwest.
+Apache-2.0. See [LICENSE](LICENSE).

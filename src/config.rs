@@ -31,20 +31,38 @@ impl Config {
         if let Ok(raw) = std::fs::read_to_string("config.toml") {
             let f: FileCfg = toml::from_str(&raw)?;
             if let Some(s) = f.server {
-                if let Some(v) = s.bind { bind = v; }
-                if let Some(v) = s.data_dir { data_dir = PathBuf::from(v); }
-                if let Some(v) = s.heartbeat_sec { heartbeat_sec = v; }
+                if let Some(v) = s.bind {
+                    bind = v;
+                }
+                if let Some(v) = s.data_dir {
+                    data_dir = PathBuf::from(v);
+                }
+                if let Some(v) = s.heartbeat_sec {
+                    heartbeat_sec = v;
+                }
             }
         }
-        if let Ok(v) = std::env::var("AGW_BIND") { bind = v; }
-        if let Ok(v) = std::env::var("AGW_DATA_DIR") { data_dir = PathBuf::from(v); }
-        if let Ok(v) = std::env::var("AGW_HEARTBEAT_SEC") {
-            heartbeat_sec = v.parse().map_err(|_| anyhow::anyhow!("AGW_HEARTBEAT_SEC must be an integer"))?;
+        if let Ok(v) = std::env::var("AGW_BIND") {
+            bind = v;
         }
-        Ok(Self { bind, data_dir, heartbeat_sec })
+        if let Ok(v) = std::env::var("AGW_DATA_DIR") {
+            data_dir = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("AGW_HEARTBEAT_SEC") {
+            heartbeat_sec = v
+                .parse()
+                .map_err(|_| anyhow::anyhow!("AGW_HEARTBEAT_SEC must be an integer"))?;
+        }
+        Ok(Self {
+            bind,
+            data_dir,
+            heartbeat_sec,
+        })
     }
 
     pub fn binds_localhost(&self) -> bool {
-        self.bind.starts_with("127.0.0.1") || self.bind.starts_with("localhost") || self.bind.starts_with("[::1]")
+        self.bind.starts_with("127.0.0.1")
+            || self.bind.starts_with("localhost")
+            || self.bind.starts_with("[::1]")
     }
 }

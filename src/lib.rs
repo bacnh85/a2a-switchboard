@@ -1,6 +1,6 @@
 pub mod admin;
-pub mod channel;
 pub mod auth;
+pub mod channel;
 pub mod config;
 pub mod health;
 pub mod peers;
@@ -15,7 +15,9 @@ use std::sync::Arc;
 #[folder = "assets/"]
 struct Assets;
 
-async fn asset(axum::extract::Path(path): axum::extract::Path<String>) -> impl axum::response::IntoResponse {
+async fn asset(
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
     match Assets::get(&path) {
         Some(f) => {
             let mime = match path.rsplit('.').next() {
@@ -52,7 +54,10 @@ pub fn router(app: Arc<App>) -> axum::Router {
         .route("/peers/{name}/reject", post(admin::reject_peer))
         .route("/peers/{name}/revoke", post(admin::revoke_peer))
         .route("/peers/{name}/delete", post(admin::delete_peer))
-        .route("/settings/bootstrap/regenerate", post(admin::regenerate_bootstrap))
+        .route(
+            "/settings/bootstrap/regenerate",
+            post(admin::regenerate_bootstrap),
+        )
         .route("/assets/{*path}", get(asset))
         .with_state(app)
 }

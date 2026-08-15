@@ -1,4 +1,4 @@
-use agent_gateway::{admin, config, health, state::App};
+use a2a_switchboard::{admin, config, health, state::App};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,17 +24,23 @@ async fn main() -> anyhow::Result<()> {
     }
     if !cfg.binds_localhost() {
         admin::LOCALHOST.store(false, std::sync::atomic::Ordering::Relaxed);
-        tracing::warn!("bound to non-localhost interface {}: admin UI is UNAUTHENTICATED", cfg.bind);
+        tracing::warn!(
+            "bound to non-localhost interface {}: admin UI is UNAUTHENTICATED",
+            cfg.bind
+        );
     }
 
     health::spawn(app.clone(), cfg.heartbeat_sec);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
-    tracing::info!("agent-gateway {} listening on http://{}", env!("CARGO_PKG_VERSION"), cfg.bind);
+    tracing::info!(
+        "a2a-switchboard {} listening on http://{}",
+        env!("CARGO_PKG_VERSION"),
+        cfg.bind
+    );
     axum::serve(
         listener,
-        agent_gateway::router(app)
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        a2a_switchboard::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
     Ok(())

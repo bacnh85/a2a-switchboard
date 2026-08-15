@@ -1,0 +1,19 @@
+services:
+  switchboard:
+    image: ghcr.io/bacnh85/a2a-switchboard:latest
+    container_name: a2a-switchboard
+    restart: unless-stopped
+    ports:
+      - "9920:9920"
+    volumes:
+      - ./data:/data
+    environment:
+      # Optional overrides; see docs/DEPLOYMENT.md
+      # - AGW_BIND=0.0.0.0:9920   # only behind a TLS terminator — admin UI is unauthenticated
+      - AGW_DATA_DIR=/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9920 && echo >&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

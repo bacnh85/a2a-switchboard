@@ -1,4 +1,6 @@
-use crate::auth::{classify_token, extract_token, forbidden, too_many, unauthorized, ClientIp, TokenKind};
+use crate::auth::{
+    classify_token, extract_token, forbidden, too_many, unauthorized, ClientIp, TokenKind,
+};
 use crate::state::{fingerprint, now, validate_url, AppState, Peer, PeerState};
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -35,18 +37,28 @@ pub async fn register(
     if !app.limiter.allow(&client_ip, 20) {
         return too_many();
     }
-    let Some(token) = extract_token(&headers) else { return unauthorized() };
+    let Some(token) = extract_token(&headers) else {
+        return unauthorized();
+    };
     let (gateway, bootstrap) = {
         let inner = app.inner.read().await;
         (inner.gateway_token.clone(), inner.bootstrap_token.clone())
     };
-    let Some(kind) = classify_token(&token, &gateway, &bootstrap) else { return unauthorized() };
+    let Some(kind) = classify_token(&token, &gateway, &bootstrap) else {
+        return unauthorized();
+    };
 
     let name = reg.name.trim().to_string();
-    if name.is_empty() || name.len() > 64
-        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
-        return err(StatusCode::UNPROCESSABLE_ENTITY, "name must be 1-64 chars of [a-zA-Z0-9._-]");
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "name must be 1-64 chars of [a-zA-Z0-9._-]",
+        );
     }
     if let Err(e) = validate_url(&reg.url) {
         return err(StatusCode::UNPROCESSABLE_ENTITY, &format!("url: {e}"));
@@ -57,7 +69,11 @@ pub async fn register(
         }
     }
     if let Some(c) = reg.card.as_ref() {
-        if serde_json::to_string(c).map(|s| s.len()).unwrap_or(usize::MAX) > 256 * 1024 {
+        if serde_json::to_string(c)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX)
+            > 256 * 1024
+        {
             return err(StatusCode::PAYLOAD_TOO_LARGE, "card too large");
         }
     }
@@ -67,19 +83,29 @@ pub async fn register(
     if let Some(idx) = inner.peers.iter().position(|p| p.name == name) {
         let existing = &inner.peers[idx];
         if existing.fingerprint != fp {
-            return err(StatusCode::CONFLICT, "peer name already registered by another identity");
+            return err(
+                StatusCode::CONFLICT,
+                "peer name already registered by another identity",
+            );
         }
         // Same identity re-registering: refresh url/card/upstream token, keep admission state.
         let peer = Peer {
             url: reg.url.clone(),
             card: reg.card.clone().unwrap_or_else(|| existing.card.clone()),
-            upstream_token: reg.upstream_token.clone().or_else(|| existing.upstream_token.clone()),
+            upstream_token: reg
+                .upstream_token
+                .clone()
+                .or_else(|| existing.upstream_token.clone()),
             ..existing.clone()
         };
         inner.peers[idx] = peer;
         drop(inner);
         app.persist().await;
-        return (StatusCode::OK, Json(serde_json::json!({"status": "updated", "peer": name, "state": "accepted"}))).into_response();
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "updated", "peer": name, "state": "accepted"})),
+        )
+            .into_response();
     }
 
     let state = match kind {
@@ -101,8 +127,16 @@ pub async fn register(
     });
     drop(inner);
     app.persist().await;
-    let s = if state == PeerState::Accepted { "accepted" } else { "pending" };
-    (StatusCode::CREATED, Json(serde_json::json!({"status": "registered", "peer": name, "state": s}))).into_response()
+    let s = if state == PeerState::Accepted {
+        "accepted"
+    } else {
+        "pending"
+    };
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({"status": "registered", "peer": name, "state": s})),
+    )
+        .into_response()
 }
 
 /// DELETE /register — deregister the calling peer (matched by token fingerprint + name).
@@ -115,7 +149,9 @@ pub async fn deregister(
     if !app.limiter.allow(&client_ip, 20) {
         return too_many();
     }
-    let Some(token) = extract_token(&headers) else { return unauthorized() };
+    let Some(token) = extract_token(&headers) else {
+        return unauthorized();
+    };
     let (gateway, bootstrap) = {
         let inner = app.inner.read().await;
         (inner.gateway_token.clone(), inner.bootstrap_token.clone())
@@ -126,14 +162,23 @@ pub async fn deregister(
     let fp = fingerprint(&token);
     let mut inner = app.inner.write().await;
     let before = inner.peers.len();
-    inner.peers.retain(|p| !(p.name == q.name && p.fingerprint == fp));
+    inner
+        .peers
+        .retain(|p| !(p.name == q.name && p.fingerprint == fp));
     let removed = before - inner.peers.len();
     drop(inner);
     app.persist().await;
     if removed == 0 {
-        return err(StatusCode::NOT_FOUND, "no such peer registered by this identity");
+        return err(
+            StatusCode::NOT_FOUND,
+            "no such peer registered by this identity",
+        );
     }
-    (StatusCode::OK, Json(serde_json::json!({"status": "deregistered", "peer": q.name}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "deregistered", "peer": q.name})),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -172,16 +217,24 @@ pub async fn agent_card(State(app): State<AppState>, headers: HeaderMap) -> Resp
                 "channel": app.channels.has(&p.name),
             });
             if authed {
-                v["capabilities"] = p.card.get("capabilities").cloned().unwrap_or(serde_json::Value::Null);
-                v["skills"] = p.card.get("skills").cloned().unwrap_or(serde_json::Value::Null);
+                v["capabilities"] = p
+                    .card
+                    .get("capabilities")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                v["skills"] = p
+                    .card
+                    .get("skills")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
             }
             v
         })
         .collect();
 
     Json(serde_json::json!({
-        "name": "agent-gateway",
-        "description": "Self-hosted A2A gateway: peer admission, directory and routing",
+        "name": "a2a-switchboard",
+        "description": "Self-hosted A2A switchboard: peer admission, directory and routing",
         "version": env!("CARGO_PKG_VERSION"),
         "protocolVersion": "0.1.0",
         "url": "/",
@@ -218,7 +271,9 @@ pub async fn proxy(
         .next()
         .unwrap_or_default()
         .to_string();
-    let Some(token) = extract_token(&headers) else { return unauthorized() };
+    let Some(token) = extract_token(&headers) else {
+        return unauthorized();
+    };
     let (gateway, bootstrap) = {
         let inner = app.inner.read().await;
         (inner.gateway_token.clone(), inner.bootstrap_token.clone())
@@ -251,7 +306,12 @@ pub async fn proxy(
         Some(r) if !r.is_empty() => r.to_string(),
         _ => "/".to_string(),
     };
-    let target = format!("{}{}{}", url.trim_end_matches('/'), rest_path, uri.query().map(|q| format!("?{q}")).unwrap_or_default());
+    let target = format!(
+        "{}{}{}",
+        url.trim_end_matches('/'),
+        rest_path,
+        uri.query().map(|q| format!("?{q}")).unwrap_or_default()
+    );
 
     let src = caller_label(&token, &gateway, &bootstrap);
     let started = std::time::Instant::now();
@@ -267,7 +327,14 @@ pub async fn proxy(
     if let Some(ut) = upstream_token {
         req = req.bearer_auth(ut);
     }
-    const SKIP: [&str; 6] = ["connection", "keep-alive", "transfer-encoding", "upgrade", "authorization", "x-gateway-token"];
+    const SKIP: [&str; 6] = [
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "upgrade",
+        "authorization",
+        "x-gateway-token",
+    ];
     for (k, v) in headers.iter() {
         let lower = k.as_str().to_lowercase();
         if SKIP.contains(&lower.as_str()) || lower == "host" || lower == "content-length" {
@@ -304,7 +371,10 @@ pub async fn proxy(
             let mut headers = axum::http::HeaderMap::new();
             for (k, v) in upstream.headers().iter() {
                 let lower = k.as_str().to_lowercase();
-                if lower == "transfer-encoding" || lower == "content-length" || lower == "connection" {
+                if lower == "transfer-encoding"
+                    || lower == "content-length"
+                    || lower == "connection"
+                {
                     continue;
                 }
                 if let (Ok(hn), Ok(Ok(hv))) = (
@@ -325,7 +395,12 @@ pub async fn proxy(
                 }
             }
             drop(inner);
-            (StatusCode::from_u16(status.as_u16()).unwrap(), headers, bytes).into_response()
+            (
+                StatusCode::from_u16(status.as_u16()).unwrap(),
+                headers,
+                bytes,
+            )
+                .into_response()
         }
         Err(e) => {
             let mut inner = app.inner.write().await;
@@ -334,11 +409,13 @@ pub async fn proxy(
                 p.last_error = Some(format!("proxy: {e}"));
             }
             drop(inner);
-            err(StatusCode::BAD_GATEWAY, &format!("upstream unreachable: {e}"))
+            err(
+                StatusCode::BAD_GATEWAY,
+                &format!("upstream unreachable: {e}"),
+            )
         }
     }
 }
-
 
 /// Channel-mode proxying: wrap the request as an envelope, push it down the
 /// peer's own outbound SSE stream, await the correlated response POST.
@@ -356,7 +433,14 @@ async fn channel_roundtrip(
         Some(r) if !r.is_empty() => r.to_string(),
         _ => "/".to_string(),
     };
-    const SKIP: [&str; 6] = ["connection", "keep-alive", "transfer-encoding", "upgrade", "authorization", "x-gateway-token"];
+    const SKIP: [&str; 6] = [
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "upgrade",
+        "authorization",
+        "x-gateway-token",
+    ];
     let mut fwd = std::collections::HashMap::new();
     for (k, v) in headers.iter() {
         let lower = k.as_str().to_lowercase();
@@ -388,8 +472,14 @@ async fn channel_roundtrip(
                 status = resp.status;
                 decode_channel_resp(resp)
             }
-            Ok(Err(_)) => { status = 502; err(StatusCode::BAD_GATEWAY, "peer channel closed") }
-            Err(_) => { status = 504; err(StatusCode::GATEWAY_TIMEOUT, "peer channel timeout") }
+            Ok(Err(_)) => {
+                status = 502;
+                err(StatusCode::BAD_GATEWAY, "peer channel closed")
+            }
+            Err(_) => {
+                status = 504;
+                err(StatusCode::GATEWAY_TIMEOUT, "peer channel timeout")
+            }
         }
     } else {
         status = 502;
@@ -421,8 +511,14 @@ fn decode_channel_resp(resp: crate::channel::RespEnvelope) -> Response {
     };
     // RFC 9110 hop-by-hop + auth-challenge headers never reach the caller.
     const RESPONSE_SKIP: [&str; 8] = [
-        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-        "te", "trailers", "transfer-encoding", "upgrade",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
     ];
     let mut headers = axum::http::HeaderMap::new();
     for (k, v) in &resp.headers {

@@ -7,8 +7,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
@@ -88,10 +88,13 @@ impl Channels {
         let mut secret = [0u8; 32];
         rand::rng().fill_bytes(&mut secret);
         let secret = hex(&secret);
-        self.peers
-            .write()
-            .unwrap()
-            .insert(name.to_string(), ChannelSlot { tx: tx.clone(), secret: secret.clone() });
+        self.peers.write().unwrap().insert(
+            name.to_string(),
+            ChannelSlot {
+                tx: tx.clone(),
+                secret: secret.clone(),
+            },
+        );
         (rx, tx, secret)
     }
 
@@ -253,7 +256,10 @@ pub async fn channel_open(
         let inner = app.inner.read().await;
         match inner.peers.iter().find(|p| p.name == q.name) {
             Some(p) if p.fingerprint == fp => (p.name.clone(), p.state),
-            Some(_) => return (StatusCode::FORBIDDEN, "peer name does not match this token").into_response(),
+            Some(_) => {
+                return (StatusCode::FORBIDDEN, "peer name does not match this token")
+                    .into_response()
+            }
             None => return (StatusCode::NOT_FOUND, "unknown peer").into_response(),
         }
     };
@@ -263,8 +269,6 @@ pub async fn channel_open(
 
     let (rx, tx, secret) = app.channels.bind(&name);
     tracing::info!("channel open: {name}");
-    let app_c = app.clone();
-    let name_c = name.clone();
     let stream = async_stream::stream! {
         yield Ok::<Event, Infallible>(Event::default().event("hello").data(secret.clone()));
         let mut rx = rx;
@@ -305,7 +309,9 @@ struct CleanupStream<S> {
     name: String,
 }
 
-impl<S: futures_util::Stream<Item = Result<Event, Infallible>>> futures_util::Stream for CleanupStream<S> {
+impl<S: futures_util::Stream<Item = Result<Event, Infallible>>> futures_util::Stream
+    for CleanupStream<S>
+{
     type Item = Result<Event, Infallible>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.inner.as_mut().poll_next(cx)
@@ -358,6 +364,10 @@ pub async fn channel_response(
     if ok {
         StatusCode::OK.into_response()
     } else {
-        (StatusCode::NOT_FOUND, "unknown, expired, or foreign request id").into_response()
+        (
+            StatusCode::NOT_FOUND,
+            "unknown, expired, or foreign request id",
+        )
+            .into_response()
     }
 }

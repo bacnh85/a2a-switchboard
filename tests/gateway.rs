@@ -1,5 +1,5 @@
 // Integration tests: admission state machine, auth-aware directory, proxy roundtrip.
-use agent_gateway::state::{App, PeerState};
+use a2a_switchboard::state::{App, PeerState};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use std::sync::Arc;
@@ -18,8 +18,13 @@ async fn test_app() -> (axum::Router, Arc<App>, String, String) {
         inner.gateway_token = "gw_test_token".into();
         inner.bootstrap_token = "boot_test_token".into();
     }
-    let router = agent_gateway::router(app.clone());
-    (router, app, "gw_test_token".into(), "boot_test_token".into())
+    let router = a2a_switchboard::router(app.clone());
+    (
+        router,
+        app,
+        "gw_test_token".into(),
+        "boot_test_token".into(),
+    )
 }
 
 fn req(method: &str, uri: &str, token: Option<&str>, body: Option<&str>) -> Request<Body> {
@@ -44,7 +49,12 @@ async fn admission_flow() {
     // 1. No token → 401
     let r = router
         .clone()
-        .oneshot(req("POST", "/register", None, Some(r#"{"name":"a","url":"http://127.0.0.1:1/"}"#)))
+        .oneshot(req(
+            "POST",
+            "/register",
+            None,
+            Some(r#"{"name":"a","url":"http://127.0.0.1:1/"}"#),
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
@@ -52,7 +62,12 @@ async fn admission_flow() {
     // 2. Gateway token → pending
     let r = router
         .clone()
-        .oneshot(req("POST", "/register", Some(&gw), Some(r#"{"name":"alpha","url":"http://127.0.0.1:1/"}"#)))
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"alpha","url":"http://127.0.0.1:1/"}"#),
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -73,13 +88,17 @@ async fn admission_flow() {
     // 4. Pending peer not proxiable → 403
     let r = router
         .clone()
-        .oneshot(req("POST", "/peer/alpha", Some(&gw), Some("{}"))
-        ).await
+        .oneshot(req("POST", "/peer/alpha", Some(&gw), Some("{}")))
+        .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
 
     // 5. Accept via admin action
-    let r = router.clone().oneshot(req("POST", "/peers/alpha/accept", None, None)).await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("POST", "/peers/alpha/accept", None, None))
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
     let inner = app.inner.read().await;
     assert_eq!(inner.peers[0].state, PeerState::Accepted);
@@ -96,8 +115,16 @@ async fn admission_flow() {
     assert_eq!(card["peers"][0]["name"], "alpha");
 
     // 7. Revoked → hidden + 403 again
-    let _ = router.clone().oneshot(req("POST", "/peers/alpha/revoke", None, None)).await.unwrap();
-    let r = router.clone().oneshot(req("POST", "/peer/alpha", Some(&gw), Some("{}"))).await.unwrap();
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/peers/alpha/revoke", None, None))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("POST", "/peer/alpha", Some(&gw), Some("{}")))
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
     let r = router
         .clone()
@@ -114,7 +141,14 @@ async fn bootstrap_auto_accepts() {
     let (router, app, _gw, boot) = test_app().await;
     let r = router
         .clone()
-        .oneshot(req("POST", "/register", Some(&boot), Some(r#"{"name":"beta","url":"http://127.0.0.1:1/","card":{"name":"beta","skills":[]}}"#)))
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(
+                r#"{"name":"beta","url":"http://127.0.0.1:1/","card":{"name":"beta","skills":[]}}"#,
+            ),
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
@@ -123,7 +157,11 @@ async fn bootstrap_auto_accepts() {
     assert!(inner.peers[0].auto_accepted);
     drop(inner);
     // immediately proxiable? upstream is unreachable → 502, not 403
-    let r = router.clone().oneshot(req("POST", "/peer/beta", Some(&boot), Some("{}"))).await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("POST", "/peer/beta", Some(&boot), Some("{}")))
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
 }
 
@@ -132,10 +170,19 @@ async fn reject_removes_pending() {
     let (router, app, gw, _boot) = test_app().await;
     let _ = router
         .clone()
-        .oneshot(req("POST", "/register", Some(&gw), Some(r#"{"name":"gamma","url":"http://127.0.0.1:1/"}"#)))
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"gamma","url":"http://127.0.0.1:1/"}"#),
+        ))
         .await
         .unwrap();
-    let _ = router.clone().oneshot(req("POST", "/peers/gamma/reject", None, None)).await.unwrap();
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/peers/gamma/reject", None, None))
+        .await
+        .unwrap();
     let inner = app.inner.read().await;
     assert!(inner.peers.is_empty());
 }
@@ -145,12 +192,22 @@ async fn name_conflict_rejected() {
     let (router, app, gw, boot) = test_app().await;
     let _ = router
         .clone()
-        .oneshot(req("POST", "/register", Some(&gw), Some(r#"{"name":"dup","url":"http://127.0.0.1:1/"}"#)))
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"dup","url":"http://127.0.0.1:1/"}"#),
+        ))
         .await
         .unwrap();
     let r = router
         .clone()
-        .oneshot(req("POST", "/register", Some(&boot), Some(r#"{"name":"dup","url":"http://127.0.0.1:2/"}"#)))
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"dup","url":"http://127.0.0.1:2/"}"#),
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::CONFLICT);
@@ -162,15 +219,19 @@ async fn name_conflict_rejected() {
 async fn proxy_roundtrip_and_log() {
     // Fake upstream A2A peer on an ephemeral port.
     let fake = axum::Router::new()
-        .route("/", axum::routing::post(|| async {
-            (
-                axum::http::StatusCode::OK,
-                axum::Json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"ok":true}})),
-            )
-        }))
-        .route("/.well-known/agent-card.json", axum::routing::get(|| async {
-            axum::Json(serde_json::json!({"name":"fake"}))
-        }));
+        .route(
+            "/",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"ok":true}})),
+                )
+            }),
+        )
+        .route(
+            "/.well-known/agent-card.json",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"name":"fake"})) }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
@@ -178,13 +239,23 @@ async fn proxy_roundtrip_and_log() {
     let (router, app, _gw, boot) = test_app().await;
     let _ = router
         .clone()
-        .oneshot(req("POST", "/register", Some(&boot), Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#))))
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
         .await
         .unwrap();
 
     let r = router
         .clone()
-        .oneshot(req("POST", "/peer/fake", Some(&boot), Some(r#"{"jsonrpc":"2.0","method":"message/send","params":{}}"#)))
+        .oneshot(req(
+            "POST",
+            "/peer/fake",
+            Some(&boot),
+            Some(r#"{"jsonrpc":"2.0","method":"message/send","params":{}}"#),
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -205,9 +276,10 @@ async fn proxy_subpath_roundtrip() {
     // /peer/{name}/{rest} must reach the upstream's subpath (regression:
     // Path<String> extractor crashed with 2 segments).
     let fake = axum::Router::new()
-        .route("/.well-known/agent-card.json", axum::routing::get(|| async {
-            axum::Json(serde_json::json!({"name":"fake"}))
-        }))
+        .route(
+            "/.well-known/agent-card.json",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"name":"fake"})) }),
+        )
         .route("/", axum::routing::post(|| async { "ok" }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -216,13 +288,23 @@ async fn proxy_subpath_roundtrip() {
     let (router, _app, _gw, boot) = test_app().await;
     let _ = router
         .clone()
-        .oneshot(req("POST", "/register", Some(&boot), Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#))))
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
         .await
         .unwrap();
 
     let r = router
         .clone()
-        .oneshot(req("GET", "/peer/fake/.well-known/agent-card.json", Some(&boot), None))
+        .oneshot(req(
+            "GET",
+            "/peer/fake/.well-known/agent-card.json",
+            Some(&boot),
+            None,
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -232,7 +314,12 @@ async fn proxy_subpath_roundtrip() {
 
 fn decode(b64: &str) -> String {
     use base64::Engine as _;
-    String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b64).unwrap()).unwrap()
+    String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap(),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -248,12 +335,20 @@ async fn channel_roundtrip_full() {
         .unwrap();
 
     // channel=false in directory before connect
-    let r = router.clone().oneshot(req("GET", "/.well-known/agent.json", Some(&boot), None)).await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/.well-known/agent.json", Some(&boot), None))
+        .await
+        .unwrap();
     let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     assert!(String::from_utf8_lossy(&b).contains(r#""channel":false"#));
 
     // Open the channel as the peer (SSE).
-    let sse = router.clone().oneshot(req("GET", "/channel?name=fw", Some(&boot), None)).await.unwrap();
+    let sse = router
+        .clone()
+        .oneshot(req("GET", "/channel?name=fw", Some(&boot), None))
+        .await
+        .unwrap();
     assert_eq!(sse.status(), StatusCode::OK);
     let mut stream = sse.into_body().into_data_stream();
 
@@ -268,8 +363,8 @@ async fn channel_roundtrip_full() {
     });
 
     // Read SSE chunks until a request envelope appears.
-    use futures_util::StreamExt;
     use base64::Engine as _;
+    use futures_util::StreamExt;
     let mut env: Option<serde_json::Value> = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline && env.is_none() {
@@ -298,7 +393,12 @@ async fn channel_roundtrip_full() {
     });
     let r = router
         .clone()
-        .oneshot(req("POST", &format!("/channel/response/{id}?name=fw"), Some(&boot), Some(&resp_json.to_string())))
+        .oneshot(req(
+            "POST",
+            &format!("/channel/response/{id}?name=fw"),
+            Some(&boot),
+            Some(&resp_json.to_string()),
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -311,9 +411,10 @@ async fn channel_roundtrip_full() {
 
     // Routing log records the channel path.
     let log = app.recent_log(10).await;
-    assert!(log.iter().any(|e| e.dst == "fw" && e.src.starts_with("channel-") && e.status == 200));
+    assert!(log
+        .iter()
+        .any(|e| e.dst == "fw" && e.src.starts_with("channel-") && e.status == 200));
 }
-
 
 #[tokio::test]
 async fn channel_impersonation_rejected() {
@@ -322,16 +423,27 @@ async fn channel_impersonation_rejected() {
     let (router, _app, _gw, boot) = test_app().await;
     for n in ["pa", "pb"] {
         let reg = serde_json::json!({"name": n, "url": "http://127.0.0.1:1/"}).to_string();
-        let _ = router.clone().oneshot(req("POST", "/register", Some(&boot), Some(&reg))).await.unwrap();
+        let _ = router
+            .clone()
+            .oneshot(req("POST", "/register", Some(&boot), Some(&reg)))
+            .await
+            .unwrap();
     }
     // A opens a channel.
-    let sse = router.clone().oneshot(req("GET", "/channel?name=pa", Some(&boot), None)).await.unwrap();
+    let sse = router
+        .clone()
+        .oneshot(req("GET", "/channel?name=pa", Some(&boot), None))
+        .await
+        .unwrap();
     let mut stream = sse.into_body().into_data_stream();
     // deliver a request to A
     let router2 = router.clone();
     let boot2 = boot.clone();
     let call = tokio::spawn(async move {
-        router2.oneshot(req("POST", "/peer/pa", Some(&boot2), Some("{}"))).await.unwrap()
+        router2
+            .oneshot(req("POST", "/peer/pa", Some(&boot2), Some("{}")))
+            .await
+            .unwrap()
     });
     use futures_util::StreamExt;
     let mut env = None;
@@ -340,7 +452,8 @@ async fn channel_impersonation_rejected() {
         if let Some(Ok(chunk)) = stream.next().await {
             let text = String::from_utf8_lossy(&chunk);
             if text.contains("event: request") {
-                env = serde_json::from_str(text.split("data: ").nth(1).unwrap_or_default().trim()).ok();
+                env = serde_json::from_str(text.split("data: ").nth(1).unwrap_or_default().trim())
+                    .ok();
             }
         }
     }
@@ -352,8 +465,21 @@ async fn channel_impersonation_rejected() {
         "id": id, "status": 200, "headers": {},
         "body_b64": "", "chan_secret": "deadbeef",
     });
-    let r = router.clone().oneshot(req("POST", &format!("/channel/response/{id}?name=pa"), Some(&boot), Some(&resp.to_string()))).await.unwrap();
-    assert_eq!(r.status(), StatusCode::NOT_FOUND, "B must not resolve A's request");
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/channel/response/{id}?name=pa"),
+            Some(&boot),
+            Some(&resp.to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "B must not resolve A's request"
+    );
     // A's caller still hangs → drop A's channel → immediate 502.
     drop(stream);
     let out = call.await.unwrap();
@@ -364,13 +490,24 @@ async fn channel_impersonation_rejected() {
 async fn channel_oversized_response_rejected() {
     let (router, _app, _gw, boot) = test_app().await;
     let reg = r#"{"name":"big","url":"http://127.0.0.1:1/"}"#;
-    let _ = router.clone().oneshot(req("POST", "/register", Some(&boot), Some(reg))).await.unwrap();
-    let sse = router.clone().oneshot(req("GET", "/channel?name=big", Some(&boot), None)).await.unwrap();
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/register", Some(&boot), Some(reg)))
+        .await
+        .unwrap();
+    let sse = router
+        .clone()
+        .oneshot(req("GET", "/channel?name=big", Some(&boot), None))
+        .await
+        .unwrap();
     let mut stream = sse.into_body().into_data_stream();
     let router2 = router.clone();
     let boot2 = boot.clone();
     let call = tokio::spawn(async move {
-        router2.oneshot(req("POST", "/peer/big", Some(&boot2), Some("{}"))).await.unwrap()
+        router2
+            .oneshot(req("POST", "/peer/big", Some(&boot2), Some("{}")))
+            .await
+            .unwrap()
     });
     use futures_util::StreamExt;
     let mut env = None;
@@ -379,7 +516,8 @@ async fn channel_oversized_response_rejected() {
         if let Some(Ok(chunk)) = stream.next().await {
             let text = String::from_utf8_lossy(&chunk);
             if text.contains("event: request") {
-                env = serde_json::from_str(text.split("data: ").nth(1).unwrap_or_default().trim()).ok();
+                env = serde_json::from_str(text.split("data: ").nth(1).unwrap_or_default().trim())
+                    .ok();
             }
         }
     }
@@ -392,7 +530,16 @@ async fn channel_oversized_response_rejected() {
         "body_b64": "A".repeat(5_500_000),
         "chan_secret": secret,
     });
-    let r = router.clone().oneshot(req("POST", &format!("/channel/response/{id}?name=big"), Some(&boot), Some(&resp.to_string()))).await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/channel/response/{id}?name=big"),
+            Some(&boot),
+            Some(&resp.to_string()),
+        ))
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
     drop(stream);
     let _ = call.await;
@@ -408,12 +555,21 @@ async fn sse_stream_delivers_route_events() {
     let (router, app, _gw, boot) = test_app().await;
     let _ = router
         .clone()
-        .oneshot(req("POST", "/register", Some(&boot), Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#))))
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
         .await
         .unwrap();
     // Subscribe before proxying.
     let mut rx = app.log_tx.subscribe();
-    let _ = router.clone().oneshot(req("POST", "/peer/fake", Some(&boot), Some("{}"))).await.unwrap();
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/peer/fake", Some(&boot), Some("{}")))
+        .await
+        .unwrap();
     let entry = rx.recv().await.unwrap();
     assert_eq!(entry.dst, "fake");
 }
@@ -424,10 +580,19 @@ async fn bad_urls_rejected() {
     for bad in ["ftp://x/y", "http://", "not-a-url", "file:///etc/passwd"] {
         let r = router
             .clone()
-            .oneshot(req("POST", "/register", Some(&gw), Some(&format!(r#"{{"name":"bad","url":"{bad}"}}"#))))
+            .oneshot(req(
+                "POST",
+                "/register",
+                Some(&gw),
+                Some(&format!(r#"{{"name":"bad","url":"{bad}"}}"#)),
+            ))
             .await
             .unwrap();
-        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY, "url accepted: {bad}");
+        assert_eq!(
+            r.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "url accepted: {bad}"
+        );
     }
 }
 
@@ -438,7 +603,12 @@ async fn rate_limited_registration() {
     for i in 0..25 {
         let r = router
             .clone()
-            .oneshot(req("POST", "/register", Some(&gw), Some(&format!(r#"{{"name":"p{i}","url":"http://127.0.0.1:1/"}}"#))))
+            .oneshot(req(
+                "POST",
+                "/register",
+                Some(&gw),
+                Some(&format!(r#"{{"name":"p{i}","url":"http://127.0.0.1:1/"}}"#)),
+            ))
             .await
             .unwrap();
         last = r.status();

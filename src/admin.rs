@@ -63,13 +63,28 @@ pub async fn dashboard(State(app): State<AppState>) -> Response {
         title: "Dashboard",
         active_nav: "dashboard",
         localhost: is_localhost(),
-        accepted: inner.peers.iter().filter(|p| p.state == PeerState::Accepted).count(),
-        pending: inner.peers.iter().filter(|p| p.state == PeerState::Pending).count(),
-        revoked: inner.peers.iter().filter(|p| p.state == PeerState::Revoked).count(),
-        healthy: inner.peers.iter().filter(|p| p.state == PeerState::Accepted && p.healthy == Some(true)).count(),
+        accepted: inner
+            .peers
+            .iter()
+            .filter(|p| p.state == PeerState::Accepted)
+            .count(),
+        pending: inner
+            .peers
+            .iter()
+            .filter(|p| p.state == PeerState::Pending)
+            .count(),
+        revoked: inner
+            .peers
+            .iter()
+            .filter(|p| p.state == PeerState::Revoked)
+            .count(),
+        healthy: inner
+            .peers
+            .iter()
+            .filter(|p| p.state == PeerState::Accepted && p.healthy == Some(true))
+            .count(),
         total_routes: app.log_ring.read().await.len() as u64,
         recent: app.recent_log(8).await,
-
     };
     Html(t.render().unwrap_or_default()).into_response()
 }
@@ -80,15 +95,35 @@ pub async fn peers_page(State(app): State<AppState>) -> Response {
         title: "Peers",
         active_nav: "peers",
         localhost: is_localhost(),
-        pending: inner.peers.iter().filter(|p| p.state == PeerState::Pending).cloned().collect(),
-        accepted: inner.peers.iter().filter(|p| p.state == PeerState::Accepted).cloned().collect(),
-        revoked: inner.peers.iter().filter(|p| p.state == PeerState::Revoked).cloned().collect(),
+        pending: inner
+            .peers
+            .iter()
+            .filter(|p| p.state == PeerState::Pending)
+            .cloned()
+            .collect(),
+        accepted: inner
+            .peers
+            .iter()
+            .filter(|p| p.state == PeerState::Accepted)
+            .cloned()
+            .collect(),
+        revoked: inner
+            .peers
+            .iter()
+            .filter(|p| p.state == PeerState::Revoked)
+            .cloned()
+            .collect(),
     };
     Html(t.render().unwrap_or_default()).into_response()
 }
 
 pub async fn logs_page(State(app): State<AppState>) -> Response {
-    let t = LogsTmpl { title: "Routing log", active_nav: "logs", localhost: is_localhost(), entries: app.recent_log(200).await };
+    let t = LogsTmpl {
+        title: "Routing log",
+        active_nav: "logs",
+        localhost: is_localhost(),
+        entries: app.recent_log(200).await,
+    };
     Html(t.render().unwrap_or_default()).into_response()
 }
 
@@ -105,9 +140,13 @@ pub struct GraphTmpl {
 pub async fn graph_page(State(app): State<AppState>) -> Response {
     // Nodes: gateway center + each accepted/pending peer. Edges: last N routed exchanges.
     let inner = app.inner.read().await;
-    let mut nodes = vec![serde_json::json!({"id": "gateway", "label": "gateway", "shape": "star", "color": "#7c3aed", "title": "agent-gateway"})];
+    let mut nodes = vec![
+        serde_json::json!({"id": "gateway", "label": "gateway", "shape": "star", "color": "#7c3aed", "title": "a2a-switchboard"}),
+    ];
     for p in &inner.peers {
-        if p.state == PeerState::Revoked { continue; }
+        if p.state == PeerState::Revoked {
+            continue;
+        }
         let color = match (p.state, p.healthy) {
             (PeerState::Accepted, Some(true)) => "#22c55e",
             (PeerState::Accepted, _) => "#ef4444",
@@ -129,13 +168,15 @@ pub async fn graph_page(State(app): State<AppState>) -> Response {
     }
     let edges: Vec<_> = counts
         .into_iter()
-        .map(|((src, dst), n)| serde_json::json!({
-            "from": if src == "gateway" { "gateway" } else { &src },
-            "to": dst,
-            "value": n,
-            "arrows": "to",
-            "title": format!("{src} → {dst}: {n} calls"),
-        }))
+        .map(|((src, dst), n)| {
+            serde_json::json!({
+                "from": if src == "gateway" { "gateway" } else { &src },
+                "to": dst,
+                "value": n,
+                "arrows": "to",
+                "title": format!("{src} → {dst}: {n} calls"),
+            })
+        })
         .collect();
     let t = GraphTmpl {
         title: "Communication graph",
@@ -180,7 +221,9 @@ pub async fn reject_peer(State(app): State<AppState>, Path(name): Path<String>) 
     // Rejected pending peers are removed entirely (they may re-register later).
     {
         let mut inner = app.inner.write().await;
-        inner.peers.retain(|p| !(p.name == name && p.state == PeerState::Pending));
+        inner
+            .peers
+            .retain(|p| !(p.name == name && p.state == PeerState::Pending));
     }
     app.persist().await;
     Redirect::to("/peers")
@@ -235,9 +278,13 @@ pub async fn graph_data(State(app): State<AppState>) -> Response {
 
 async fn graph_json(app: &AppState) -> serde_json::Value {
     let inner = app.inner.read().await;
-    let mut nodes = vec![serde_json::json!({"id": "gateway", "label": "gateway", "shape": "star", "color": "#7c3aed"})];
+    let mut nodes = vec![
+        serde_json::json!({"id": "gateway", "label": "gateway", "shape": "star", "color": "#7c3aed"}),
+    ];
     for p in &inner.peers {
-        if p.state == PeerState::Revoked { continue; }
+        if p.state == PeerState::Revoked {
+            continue;
+        }
         let color = match (p.state, p.healthy) {
             (PeerState::Accepted, Some(true)) => "#22c55e",
             (PeerState::Accepted, _) => "#ef4444",
