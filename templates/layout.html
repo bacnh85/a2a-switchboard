@@ -30,12 +30,13 @@
     {% endif %}
   </div>
 </aside>
-{% if !localhost %}
+<main class="content">
+{% if !localhost && !authed %}
 <div class="banner banner-warn" role="alert">
-  No admin password is set and the gateway is bound to a non-localhost interface. Anyone on this network can accept peers and read tokens. Set a password under Settings (from localhost) or restrict access at your firewall.
+  <span>No admin password is set and the gateway is bound to a non-localhost interface. Anyone on this network can accept peers and read tokens.</span>
+  <a href="/settings" class="banner-link">Set a password</a>
 </div>
 {% endif %}
-<main class="content">
 {% block content %}{% endblock %}
 </main>
 </body>

@@ -85,13 +85,22 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; 
 .nav-link.active { background: var(--surface-2); color: var(--text); }
 
 .banner {
-  max-width: 1200px;
-  margin: var(--s-2) auto 0;
+  max-width: none;
+  margin: 0 0 var(--s-2);
   padding: var(--s-1) var(--s-2);
   border-radius: var(--r-md);
   font-size: var(--fs-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
 }
 .banner-warn { background: var(--warn-bg); color: var(--warn); }
+.banner-link {
+  color: var(--warn);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.banner-link:hover { color: var(--text); }
 
 .shell { display: flex; min-height: 100vh; }
 
@@ -131,8 +140,6 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; 
 .btn-ghost:hover { background: var(--surface-2); color: var(--text); }
 
 .content { flex: 1; min-width: 0; padding: var(--s-3) var(--s-4) var(--s-4); max-width: 1280px; }
-
-.banner { max-width: none; margin: 0 0 var(--s-2); }
 
 /* login */
 .login-body { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: var(--s-2); }
