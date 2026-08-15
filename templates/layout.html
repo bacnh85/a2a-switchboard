@@ -5,25 +5,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{title}} · a2a-switchboard</title>
 <link rel="stylesheet" href="/assets/app.css">
-<script src="/assets/vendor/htmx.min.js"></script>
-<script src="/assets/vendor/sse.js" defer></script>
 </head>
-<body hx-ext="sse" sse-connect="/api/events">
-<header class="topbar">
-  <div class="topbar-inner">
-    <a class="brand" href="/"><span class="brand-mark">◈</span> a2a-switchboard</a>
-    <nav>
-      <a href="/" class="nav-link{% if active_nav == "dashboard" %} active{% endif %}">Dashboard</a>
-      <a href="/peers" class="nav-link{% if active_nav == "peers" %} active{% endif %}">Peers</a>
-      <a href="/logs" class="nav-link{% if active_nav == "logs" %} active{% endif %}">Logs</a>
-      <a href="/graph" class="nav-link{% if active_nav == "graph" %} active{% endif %}">Graph</a>
-      <a href="/settings" class="nav-link{% if active_nav == "settings" %} active{% endif %}">Settings</a>
-    </nav>
+<body class="shell">
+<aside class="sidebar">
+  <a class="brand" href="/"><span class="brand-mark">◈</span> <span class="brand-name">a2a-switchboard</span></a>
+  <nav class="sidenav">
+    <a href="/" class="nav-link{% if active_nav == "dashboard" %} active{% endif %}">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2h5v5H2zM9 2h5v3H9zM9 7h5v7H9zM2 9h5v5H2z"/></svg>Dashboard
+    </a>
+    <a href="/peers" class="nav-link{% if active_nav == "peers" %} active{% endif %}">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3" r="2"/><circle cx="3" cy="13" r="2"/><circle cx="13" cy="13" r="2"/><path d="M8 5v3M8 8 4 11.5M8 8l4 3.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>Peers
+    </a>
+    <a href="/logs" class="nav-link{% if active_nav == "logs" %} active{% endif %}">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2h10v12H3z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>Logs
+    </a>
+    <a href="/settings" class="nav-link{% if active_nav == "settings" %} active{% endif %}">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>Settings
+    </a>
+  </nav>
+  <div class="sidebar-foot">
+    <span class="muted ver">v{{ "0.1.0" }}</span>
+    {% if authed %}
+    <form method="post" action="/logout"><button class="btn btn-ghost">Sign out</button></form>
+    {% endif %}
   </div>
-</header>
+</aside>
 {% if !localhost %}
 <div class="banner banner-warn" role="alert">
-  Admin UI is unauthenticated and bound to a non-localhost interface. Anyone on this network can accept peers and read tokens. Restrict access at your TLS terminator or firewall.
+  No admin password is set and the gateway is bound to a non-localhost interface. Anyone on this network can accept peers and read tokens. Set a password under Settings (from localhost) or restrict access at your firewall.
 </div>
 {% endif %}
 <main class="content">

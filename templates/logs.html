@@ -2,7 +2,7 @@
 {% block content %}
 <h1>Routing log</h1>
 <p class="muted">Last 200 entries (in-memory ring). Full history: <code>data/routing.jsonl</code>.</p>
-<table class="tbl" sse-swap="route" hx-swap="beforeend">
+<table class="tbl">
   <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>
   <tbody>
   {% for e in entries %}

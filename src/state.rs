@@ -29,6 +29,11 @@ pub struct Peer {
     /// Token the gateway presents when proxying TO this peer (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_token: Option<String>,
+    /// Unique per-peer token for CALLING through this gateway (caller
+    /// identity). Issued at registration; resolves the caller to this peer
+    /// name even when the shared gateway token is used for auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_token: Option<String>,
     pub registered_at: i64,
     #[serde(default)]
     pub last_seen: Option<i64>,
@@ -46,6 +51,8 @@ struct Persisted {
     bootstrap_token: String,
     #[serde(default)]
     peers: Vec<Peer>,
+    #[serde(default)]
+    admin: Option<AdminCred>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,7 +97,19 @@ pub struct Inner {
     pub gateway_token: String,
     pub bootstrap_token: String,
     pub peers: Vec<Peer>,
+    pub admin: Option<AdminCred>,
 }
+
+/// Salted hash of the admin dashboard password.
+// ponytail: sha256+salt+ct_eq, not argon2 — state.json already stores plaintext
+// gateway/bootstrap tokens; upgrade if those are ever hashed at rest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminCred {
+    pub salt: String,
+    pub hash: String,
+}
+
+pub const SESSION_TTL: i64 = 12 * 3600;
 
 pub struct App {
     pub data_dir: PathBuf,
@@ -101,6 +120,8 @@ pub struct App {
     pub http: reqwest::Client,
     /// Reverse channels: firewalled peers hold outbound SSE connections here.
     pub channels: crate::channel::Channels,
+    /// Admin UI sessions: token -> expires_unix. In-memory; restart logs out.
+    pub sessions: Mutex<HashMap<String, i64>>,
 }
 
 pub type AppState = Arc<App>;
@@ -140,12 +161,14 @@ impl App {
                 gateway_token: p.gateway_token,
                 bootstrap_token: p.bootstrap_token,
                 peers: p.peers,
+                admin: p.admin,
             }
         } else {
             Inner {
                 gateway_token: gen_token(),
                 bootstrap_token: gen_token(),
                 peers: Vec::new(),
+                admin: None,
             }
         };
         let (log_tx, _) = broadcast::channel(256);
@@ -162,6 +185,7 @@ impl App {
             limiter: RateLimiter::default(),
             http,
             channels: crate::channel::Channels::new(),
+            sessions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -172,6 +196,7 @@ impl App {
             gateway_token: inner.gateway_token.clone(),
             bootstrap_token: inner.bootstrap_token.clone(),
             peers: inner.peers.clone(),
+            admin: inner.admin.clone(),
         };
         drop(inner);
         if let Ok(json) = serde_json::to_string_pretty(&p) {
@@ -214,6 +239,70 @@ impl App {
         self.persist().await;
         t
     }
+
+    /// Set or change the admin password. When one exists, `current` must match.
+    pub async fn set_admin_password(
+        &self,
+        current: Option<&str>,
+        new: &str,
+    ) -> Result<(), &'static str> {
+        {
+            let mut inner = self.inner.write().await;
+            if let Some(cred) = &inner.admin {
+                let cur = current.ok_or("current password required")?;
+                if hash_pw(&cred.salt, cur) != cred.hash {
+                    return Err("current password is incorrect");
+                }
+            }
+            if new.len() < 8 {
+                return Err("new password must be at least 8 characters");
+            }
+            let salt = gen_token();
+            inner.admin = Some(AdminCred {
+                hash: hash_pw(&salt, new),
+                salt,
+            });
+        }
+        self.persist().await;
+        Ok(())
+    }
+
+    pub async fn verify_admin_password(&self, pw: &str) -> bool {
+        let inner = self.inner.read().await;
+        match &inner.admin {
+            Some(c) => crate::auth::ct_eq(&hash_pw(&c.salt, pw), &c.hash),
+            None => false,
+        }
+    }
+
+    pub async fn admin_set(&self) -> bool {
+        self.inner.read().await.admin.is_some()
+    }
+
+    pub fn create_session(&self) -> String {
+        let t = gen_token();
+        let mut s = self.sessions.lock().unwrap();
+        s.retain(|_, exp| *exp > now());
+        s.insert(t.clone(), now() + SESSION_TTL);
+        t
+    }
+
+    pub fn session_valid(&self, token: &str) -> bool {
+        let mut s = self.sessions.lock().unwrap();
+        s.retain(|_, exp| *exp > now());
+        s.contains_key(token)
+    }
+
+    pub fn drop_session(&self, token: &str) {
+        self.sessions.lock().unwrap().remove(token);
+    }
+}
+
+fn hash_pw(salt: &str, pw: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(salt.as_bytes());
+    h.update(pw.as_bytes());
+    hex(&h.finalize())
 }
 
 /// Validate a peer-declared URL: http(s) only, has host. Deny-by-default egress starts here.

@@ -1,6 +1,33 @@
 {% extends "layout.html" %}
 {% block content %}
 <h1>Settings</h1>
+{% if pw == "ok" %}<div class="banner" role="status">Password saved.</div>{% endif %}
+{% if pw == "mismatch" %}<div class="banner banner-warn" role="alert">New password and confirmation do not match.</div>{% endif %}
+{% if pw == "error" %}<div class="banner banner-warn" role="alert">Could not save password — check the current password and that the new one is at least 8 characters.</div>{% endif %}
+<section class="card">
+  <h2>Admin access</h2>
+  {% if password_set %}
+  <p>Change the password required to open this dashboard. Sessions expire after 12h or on restart.</p>
+  <form method="post" action="/settings/password" class="pw-form">
+    <label for="cur">Current password</label>
+    <input id="cur" type="password" name="current" required autocomplete="current-password">
+    <label for="new">New password (min 8 chars)</label>
+    <input id="new" type="password" name="new" required minlength="8" autocomplete="new-password">
+    <label for="conf">Confirm new password</label>
+    <input id="conf" type="password" name="confirm" required minlength="8" autocomplete="new-password">
+    <button class="btn btn-primary" type="submit">Change password</button>
+  </form>
+  {% else %}
+  <p>Set a password to protect this dashboard. Until then the UI stays open. For safety, the password can only be set from a localhost connection.</p>
+  <form method="post" action="/settings/password" class="pw-form">
+    <label for="new">Password (min 8 chars)</label>
+    <input id="new" type="password" name="new" required minlength="8" autocomplete="new-password">
+    <label for="conf">Confirm password</label>
+    <input id="conf" type="password" name="confirm" required minlength="8" autocomplete="new-password">
+    <button class="btn btn-primary" type="submit">Set password</button>
+  </form>
+  {% endif %}
+</section>
 <section class="card">
   <h2>Gateway API token</h2>
   <p>Peers authenticate with this token. Registering with it puts them in the pending queue.</p>

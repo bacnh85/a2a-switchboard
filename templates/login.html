@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · a2a-switchboard</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="login-body">
+<div class="login-box">
+  <a class="brand" href="/"><span class="brand-mark">◈</span> a2a-switchboard</a>
+  <h1>Sign in</h1>
+  {% if !error.is_empty() %}<div class="banner banner-warn" role="alert">{{error}}</div>{% endif %}
+  <form method="post" action="/login">
+    <label for="password">Admin password</label>
+    <input id="password" type="password" name="password" required autofocus autocomplete="current-password">
+    <button class="btn btn-primary" type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>

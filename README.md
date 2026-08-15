@@ -5,7 +5,7 @@
 A single Rust binary that brokers A2A traffic between agents the way an operator
 switchboard connects calls: agents wait at the board until **you** connect them.
 No config-file wrestling, no control plane — a live admin UI for admission,
-routing logs, and a communication graph.
+routing logs, and a live routing topology.
 
 ```
 Peer A ──┐                            ┌── Peer B (public URL)
@@ -19,7 +19,7 @@ Peer C ──┘                            └── Peer D (firewalled — rev
 teams** — YAML, RBAC policies, LLM/MCP routing. This project solves
 **human-in-the-loop admission for self-hosters**: your agents (Pi, Hermes, any
 A2A client) register, wait in a pending queue, and YOU accept them — with
-tokens, a directory, live routing logs, and a communication graph in one binary.
+tokens, a directory, live routing logs, and a live topology view in one binary.
 
 ## Features
 
@@ -34,8 +34,16 @@ tokens, a directory, live routing logs, and a communication graph in one binary.
   connections are peer-initiated — one open inbound port is enough.
 - **Directory as Agent Card** — `/.well-known/agent.json` (alias
   `agent-card.json`) lists accepted peers, auth-aware.
-- **Admin UI** — dashboard (connected/healthy counts), pending-peer queue,
-  live routing log (SSE), communication graph (vis-network).
+- **Admin UI** — sidebar layout, dashboard with **live routing topology**
+  (requests animate as packets caller → gateway → destination, live
+  communication log of every routed request), pending-peer queue, routing log.
+- **Caller attribution** — optional `X-Gateway-Caller` header (advisory,
+  display-only, stripped before forwarding) so the dashboard shows which peer
+  made each call.
+- **Password protection** — optional admin password, set in Settings (initial
+  set requires a localhost connection). Auth is off until a password is set;
+  then all admin pages/APIs require a 12h session cookie. Peer/token endpoints
+  are unaffected.
 - **Zero-dep runtime** — rust-embed bakes the UI in; single 7MB static binary,
   no Node, no CDN, no database.
 

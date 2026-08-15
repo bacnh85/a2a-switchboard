@@ -7,7 +7,7 @@ pub fn is_localhost() -> bool {
     LOCALHOST.load(std::sync::atomic::Ordering::Relaxed)
 }
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::{Form, Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use std::convert::Infallible;
@@ -19,12 +19,14 @@ pub struct DashboardTmpl {
     pub title: &'static str,
     pub active_nav: &'static str,
     pub localhost: bool,
+    pub authed: bool,
     pub accepted: usize,
     pub pending: usize,
     pub revoked: usize,
     pub healthy: usize,
     pub total_routes: u64,
     pub recent: Vec<RouteEntry>,
+    pub peers_json: String,
 }
 
 #[derive(Template)]
@@ -33,6 +35,7 @@ pub struct PeersTmpl {
     pub title: &'static str,
     pub active_nav: &'static str,
     pub localhost: bool,
+    pub authed: bool,
     pub pending: Vec<Peer>,
     pub accepted: Vec<Peer>,
     pub revoked: Vec<Peer>,
@@ -44,6 +47,7 @@ pub struct LogsTmpl {
     pub title: &'static str,
     pub active_nav: &'static str,
     pub localhost: bool,
+    pub authed: bool,
     pub entries: Vec<RouteEntry>,
 }
 
@@ -53,21 +57,32 @@ pub struct SettingsTmpl {
     pub title: &'static str,
     pub active_nav: &'static str,
     pub localhost: bool,
+    pub authed: bool,
+    pub password_set: bool,
+    pub pw: String,
     pub gateway_token: String,
     pub bootstrap_token: String,
 }
 
 pub async fn dashboard(State(app): State<AppState>) -> Response {
     let inner = app.inner.read().await;
+    let accepted = inner
+        .peers
+        .iter()
+        .filter(|p| p.state == PeerState::Accepted)
+        .count();
+    let healthy = inner
+        .peers
+        .iter()
+        .filter(|p| p.state == PeerState::Accepted && p.healthy == Some(true))
+        .count();
+    let peers_json = topology_peers(&app, &inner.peers).to_string();
     let t = DashboardTmpl {
         title: "Dashboard",
         active_nav: "dashboard",
         localhost: is_localhost(),
-        accepted: inner
-            .peers
-            .iter()
-            .filter(|p| p.state == PeerState::Accepted)
-            .count(),
+        authed: app.admin_set().await,
+        accepted,
         pending: inner
             .peers
             .iter()
@@ -78,14 +93,12 @@ pub async fn dashboard(State(app): State<AppState>) -> Response {
             .iter()
             .filter(|p| p.state == PeerState::Revoked)
             .count(),
-        healthy: inner
-            .peers
-            .iter()
-            .filter(|p| p.state == PeerState::Accepted && p.healthy == Some(true))
-            .count(),
+        healthy,
         total_routes: app.log_ring.read().await.len() as u64,
         recent: app.recent_log(8).await,
+        peers_json,
     };
+    drop(inner);
     Html(t.render().unwrap_or_default()).into_response()
 }
 
@@ -95,6 +108,7 @@ pub async fn peers_page(State(app): State<AppState>) -> Response {
         title: "Peers",
         active_nav: "peers",
         localhost: is_localhost(),
+        authed: app.admin_set().await,
         pending: inner
             .peers
             .iter()
@@ -122,85 +136,61 @@ pub async fn logs_page(State(app): State<AppState>) -> Response {
         title: "Routing log",
         active_nav: "logs",
         localhost: is_localhost(),
+        authed: app.admin_set().await,
         entries: app.recent_log(200).await,
     };
     Html(t.render().unwrap_or_default()).into_response()
 }
 
-#[derive(Template)]
-#[template(path = "graph.html")]
-pub struct GraphTmpl {
-    pub title: &'static str,
-    pub active_nav: &'static str,
-    pub localhost: bool,
-    pub nodes_json: String,
-    pub edges_json: String,
-}
-
-pub async fn graph_page(State(app): State<AppState>) -> Response {
-    // Nodes: gateway center + each accepted/pending peer. Edges: last N routed exchanges.
-    let inner = app.inner.read().await;
-    let mut nodes = vec![
-        serde_json::json!({"id": "gateway", "label": "gateway", "shape": "star", "color": "#7c3aed", "title": "a2a-switchboard"}),
-    ];
-    for p in &inner.peers {
-        if p.state == PeerState::Revoked {
-            continue;
-        }
-        let color = match (p.state, p.healthy) {
-            (PeerState::Accepted, Some(true)) => "#22c55e",
-            (PeerState::Accepted, _) => "#ef4444",
-            _ => "#eab308",
-        };
-        nodes.push(serde_json::json!({
-            "id": p.name, "label": p.name, "color": color,
-            "shape": "dot", "size": 14,
-            "title": format!("{}\n{}", p.name, p.url),
-        }));
-    }
-    drop(inner);
-    let routes = app.recent_log(200).await;
-    // Aggregate directed traffic counts src→dst.
-    use std::collections::BTreeMap;
-    let mut counts: BTreeMap<(String, String), u32> = BTreeMap::new();
-    for r in &routes {
-        *counts.entry((r.src.clone(), r.dst.clone())).or_insert(0) += 1;
-    }
-    let edges: Vec<_> = counts
-        .into_iter()
-        .map(|((src, dst), n)| {
-            serde_json::json!({
-                "from": if src == "gateway" { "gateway" } else { &src },
-                "to": dst,
-                "value": n,
-                "arrows": "to",
-                "title": format!("{src} → {dst}: {n} calls"),
-            })
-        })
-        .collect();
-    let t = GraphTmpl {
-        title: "Communication graph",
-        active_nav: "graph",
-        localhost: is_localhost(),
-        nodes_json: serde_json::to_string(&nodes).unwrap(),
-        edges_json: serde_json::to_string(&edges).unwrap(),
-    };
-    Html(t.render().unwrap_or_default()).into_response()
-}
-
-pub async fn settings_page(State(app): State<AppState>) -> Response {
+pub async fn settings_page(
+    State(app): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
     let inner = app.inner.read().await;
     let t = SettingsTmpl {
         title: "Settings",
         active_nav: "settings",
         localhost: is_localhost(),
+        authed: app.admin_set().await,
+        password_set: inner.admin.is_some(),
+        pw: q.get("pw").cloned().unwrap_or_default(),
         gateway_token: inner.gateway_token.clone(),
         bootstrap_token: inner.bootstrap_token.clone(),
     };
+    drop(inner);
     Html(t.render().unwrap_or_default()).into_response()
 }
 
-// ----- actions (htmx form posts → redirect) -----
+#[derive(serde::Deserialize)]
+pub struct PasswordForm {
+    pub current: Option<String>,
+    pub new: String,
+    pub confirm: String,
+}
+
+/// Set (first time, localhost only) or change the admin password.
+pub async fn set_password(
+    State(app): State<AppState>,
+    crate::auth::ClientIp(ip): crate::auth::ClientIp,
+    Form(f): Form<PasswordForm>,
+) -> Response {
+    let localhost = ip.starts_with("127.0.0.1") || ip.starts_with("::1");
+    let is_change = app.admin_set().await;
+    if !is_change && !localhost {
+        return Redirect::to("/settings").into_response();
+    }
+    if f.new != f.confirm {
+        return Redirect::to("/settings?pw=mismatch").into_response();
+    }
+    let cur = f.current.as_deref().filter(|s| !s.is_empty());
+    match app.set_admin_password(cur, &f.new).await {
+        Ok(()) => Redirect::to("/settings?pw=ok"),
+        Err(_) => Redirect::to("/settings?pw=error"),
+    }
+    .into_response()
+}
+
+// ----- actions (form posts → redirect) -----
 
 async fn set_state(app: &AppState, name: &str, state: PeerState) {
     {
@@ -250,14 +240,55 @@ pub async fn regenerate_bootstrap(State(app): State<AppState>) -> Redirect {
 
 // ----- SSE + JSON feeds -----
 
-/// SSE stream of new routing entries (event: route) + pings.
+/// JSON feed for the live topology: peers with health/state flags.
+pub async fn topology_data(State(app): State<AppState>) -> Response {
+    let inner = app.inner.read().await;
+    axum::Json(serde_json::json!({
+        "peers": topology_peers(&app, &inner.peers),
+        "total_routes": app.log_ring.read().await.len() as u64,
+    }))
+    .into_response()
+}
+
+fn topology_peers(app: &AppState, peers: &[Peer]) -> serde_json::Value {
+    serde_json::json!(peers
+        .iter()
+        .filter(|p| p.state != PeerState::Revoked)
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "state": match p.state { PeerState::Pending => "pending", PeerState::Accepted => "accepted", PeerState::Revoked => "revoked" },
+                "healthy": p.healthy,
+                "channel": app.channels.has(&p.name),
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+/// SSE stream of new routing entries (event: route) + pings. The session is
+/// re-validated every 15s regardless of event frequency, so logout/expiry
+/// closes the stream (instead of streaming forever on a busy gateway).
 pub async fn sse_events(
     State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let session = crate::login::session_token(&headers);
     let rx = app.log_tx.subscribe();
     let stream = async_stream::try_stream! {
         let mut rx = rx;
+        let mut last_check = std::time::Instant::now();
         loop {
+            // Revalidate the session every 15s on EVERY iteration — busy
+            // event streams never hit the idle timeout, so the check must
+            // not live only in the timeout branch.
+            if last_check.elapsed() >= Duration::from_secs(15) {
+                last_check = std::time::Instant::now();
+                if app.admin_set().await
+                    && session.as_deref().map(|t| !app.session_valid(t)).unwrap_or(true)
+                {
+                    break;
+                }
+            }
             match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
                 Ok(Ok(entry)) => {
                     yield Event::default().event("route").data(serde_json::to_string(&entry).unwrap_or_default());
@@ -271,37 +302,4 @@ pub async fn sse_events(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-/// JSON graph data for the communication graph page (polled by htmx every 5s).
-pub async fn graph_data(State(app): State<AppState>) -> Response {
-    axum::Json(graph_json(&app).await).into_response()
-}
 
-async fn graph_json(app: &AppState) -> serde_json::Value {
-    let inner = app.inner.read().await;
-    let mut nodes = vec![
-        serde_json::json!({"id": "gateway", "label": "gateway", "shape": "star", "color": "#7c3aed"}),
-    ];
-    for p in &inner.peers {
-        if p.state == PeerState::Revoked {
-            continue;
-        }
-        let color = match (p.state, p.healthy) {
-            (PeerState::Accepted, Some(true)) => "#22c55e",
-            (PeerState::Accepted, _) => "#ef4444",
-            _ => "#eab308",
-        };
-        nodes.push(serde_json::json!({"id": p.name, "label": p.name, "color": color, "shape": "dot", "size": 14}));
-    }
-    drop(inner);
-    let routes = app.recent_log(200).await;
-    use std::collections::BTreeMap;
-    let mut counts: BTreeMap<(String, String), u32> = BTreeMap::new();
-    for r in &routes {
-        *counts.entry((r.src.clone(), r.dst.clone())).or_insert(0) += 1;
-    }
-    let edges: Vec<_> = counts
-        .into_iter()
-        .map(|((src, dst), n)| serde_json::json!({"from": src, "to": dst, "value": n, "arrows": "to"}))
-        .collect();
-    serde_json::json!({ "nodes": nodes, "edges": edges })
-}

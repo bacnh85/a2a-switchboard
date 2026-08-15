@@ -16,8 +16,14 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
     ) -> Result<Self, Self::Rejection> {
         let ip = parts
             .extensions
-            .get::<SocketAddr>()
-            .map(|a| a.ip().to_string())
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|a| a.0.ip().to_string())
+            .or_else(|| {
+                parts
+                    .extensions
+                    .get::<SocketAddr>()
+                    .map(|a| a.ip().to_string())
+            })
             .unwrap_or_else(|| "unknown".into());
         Ok(ClientIp(ip))
     }
@@ -29,6 +35,8 @@ pub enum TokenKind {
     Bootstrap,
     /// Gateway token: registrant goes to the pending queue unless already accepted.
     Gateway,
+    /// A peer's unique caller token (per-peer identity, issued at registration).
+    Peer,
 }
 
 /// Extract bearer token from Authorization header or X-Gateway-Token.
@@ -47,7 +55,7 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-fn ct_eq(a: &str, b: &str) -> bool {
+pub fn ct_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 

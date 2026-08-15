@@ -1,8 +1,0 @@
-{% extends "layout.html" %}
-{% block content %}
-<h1>Communication graph</h1>
-<p class="muted">Accepted peers (green = healthy, red = unreachable) and routed traffic in the recent window. Refreshes every 5s.</p>
-<div id="graph" class="graph" data-nodes='{{nodes_json}}' data-edges='{{edges_json}}'></div>
-<script src="/assets/vendor/vis-network.min.js" defer></script>
-<script src="/assets/graph.js" defer></script>
-{% endblock %}

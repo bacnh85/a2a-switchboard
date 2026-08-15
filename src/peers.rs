@@ -1,7 +1,7 @@
 use crate::auth::{
     classify_token, extract_token, forbidden, too_many, unauthorized, ClientIp, TokenKind,
 };
-use crate::state::{fingerprint, now, validate_url, AppState, Peer, PeerState};
+use crate::state::{fingerprint, gen_token, now, validate_url, AppState, Peer, PeerState};
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
@@ -89,6 +89,10 @@ pub async fn register(
             );
         }
         // Same identity re-registering: refresh url/card/upstream token, keep admission state.
+        // Mint the per-peer caller token if missing (peers registered before
+        // the upgrade have none until their next heartbeat).
+        let real_state = existing.state;
+        let minted = existing.caller_token.is_none();
         let peer = Peer {
             url: reg.url.clone(),
             card: reg.card.clone().unwrap_or_else(|| existing.card.clone()),
@@ -96,21 +100,35 @@ pub async fn register(
                 .upstream_token
                 .clone()
                 .or_else(|| existing.upstream_token.clone()),
+            caller_token: existing
+                .caller_token
+                .clone()
+                .or_else(|| Some(gen_token())),
             ..existing.clone()
         };
         inner.peers[idx] = peer;
         drop(inner);
         app.persist().await;
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "updated", "peer": name, "state": "accepted"})),
-        )
-            .into_response();
+        let state_s = match real_state {
+            PeerState::Pending => "pending",
+            PeerState::Accepted => "accepted",
+            PeerState::Revoked => "revoked",
+        };
+        let mut resp = serde_json::json!({"status": "updated", "peer": name, "state": state_s});
+        // Only disclose the caller token when THIS call minted it (creation or
+        // pre-upgrade mint); repeat heartbeats must not re-disclose the
+        // per-peer credential to shared-token holders.
+        if minted {
+            resp["caller_token"] = serde_json::json!(inner2(&app, &name).await);
+        }
+        return (StatusCode::OK, Json(resp)).into_response();
     }
 
     let state = match kind {
         TokenKind::Bootstrap => PeerState::Accepted,
         TokenKind::Gateway => PeerState::Pending,
+        // Peer caller tokens are for proxying, not registration.
+        TokenKind::Peer => return unauthorized(),
     };
     inner.peers.push(Peer {
         name: name.clone(),
@@ -119,6 +137,7 @@ pub async fn register(
         state,
         fingerprint: fp,
         upstream_token: reg.upstream_token,
+        caller_token: Some(gen_token()),
         registered_at: now(),
         last_seen: None,
         healthy: None,
@@ -132,9 +151,10 @@ pub async fn register(
     } else {
         "pending"
     };
+    let ct = inner2(&app, &name).await;
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({"status": "registered", "peer": name, "state": s})),
+        Json(serde_json::json!({"status": "registered", "peer": name, "state": s, "caller_token": ct})),
     )
         .into_response()
 }
@@ -192,6 +212,59 @@ pub fn caller_label(token: &str, gateway: &str, bootstrap: &str) -> String {
     match classify_token(token, gateway, bootstrap) {
         Some(TokenKind::Bootstrap) => "bootstrap".to_string(),
         _ => format!("client-{}", fingerprint(token).get(..8).unwrap_or("")),
+    }
+}
+
+async fn inner2(app: &AppState, name: &str) -> Option<String> {
+    let inner = app.inner.read().await;
+    inner.peers.iter().find(|p| p.name == name).and_then(|p| p.caller_token.clone())
+}
+
+/// True when the token is the gateway/bootstrap token OR a peer's caller token.
+async fn authorized_token(app: &AppState, token: &str, gateway: &str, bootstrap: &str) -> bool {
+    if classify_token(token, gateway, bootstrap).is_some() {
+        return true;
+    }
+    peer_from_token(app, token).await.is_some()
+}
+
+/// Resolve a presented token to a registered peer name via its per-peer
+/// caller token (constant-time compare). None = not a peer token.
+async fn peer_from_token(app: &AppState, token: &str) -> Option<String> {
+    let inner = app.inner.read().await;
+    for p in &inner.peers {
+        if let Some(ct) = &p.caller_token {
+            if crate::auth::ct_eq(ct, token) {
+                return Some(p.name.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Channel-path variant: per-peer token → name (no prefix); else header; else
+/// `channel-<label>` fallback so channel delivery stays visible.
+async fn caller_display_channel(app: &AppState, token: &str, gw: &str, boot: &str, header: Option<&str>) -> String {
+    if let Some(name) = peer_from_token(app, token).await {
+        return name;
+    }
+    match header.map(str::trim).filter(|h| !h.is_empty() && h.len() <= 64) {
+        Some(name) => name.to_string(),
+        None => format!("channel-{}", caller_label(token, gw, boot)),
+    }
+}
+
+/// Display-name attribution for the routing log: an `X-Gateway-Caller` header
+/// (e.g. pi-a2a's selfIdentity) when the caller provides one, else the stable
+/// fingerprint label. Advisory only — same trust level as the shared token.
+async fn caller_display(app: &AppState, token: &str, gateway: &str, bootstrap: &str, header: Option<&str>) -> String {
+    // Highest confidence: a per-peer caller token identifies the peer exactly.
+    if let Some(name) = peer_from_token(app, token).await {
+        return name;
+    }
+    match header.map(str::trim).filter(|h| !h.is_empty() && h.len() <= 64) {
+        Some(name) => name.to_string(),
+        None => caller_label(token, gateway, bootstrap),
     }
 }
 
@@ -278,7 +351,7 @@ pub async fn proxy(
         let inner = app.inner.read().await;
         (inner.gateway_token.clone(), inner.bootstrap_token.clone())
     };
-    if classify_token(&token, &gateway, &bootstrap).is_none() {
+    if !authorized_token(&app, &token, &gateway, &bootstrap).await {
         return unauthorized();
     }
 
@@ -313,7 +386,14 @@ pub async fn proxy(
         uri.query().map(|q| format!("?{q}")).unwrap_or_default()
     );
 
-    let src = caller_label(&token, &gateway, &bootstrap);
+    let src = caller_display(
+        &app,
+        &token,
+        &gateway,
+        &bootstrap,
+        headers.get("x-gateway-caller").and_then(|v| v.to_str().ok()),
+    )
+    .await;
     let started = std::time::Instant::now();
     let method_s = method.to_string();
 
@@ -327,13 +407,14 @@ pub async fn proxy(
     if let Some(ut) = upstream_token {
         req = req.bearer_auth(ut);
     }
-    const SKIP: [&str; 6] = [
+    const SKIP: [&str; 7] = [
         "connection",
         "keep-alive",
         "transfer-encoding",
         "upgrade",
         "authorization",
         "x-gateway-token",
+        "x-gateway-caller",
     ];
     for (k, v) in headers.iter() {
         let lower = k.as_str().to_lowercase();
@@ -374,6 +455,8 @@ pub async fn proxy(
                 if lower == "transfer-encoding"
                     || lower == "content-length"
                     || lower == "connection"
+                    || lower == "set-cookie"
+                    || lower == "www-authenticate"
                 {
                     continue;
                 }
@@ -433,13 +516,14 @@ async fn channel_roundtrip(
         Some(r) if !r.is_empty() => r.to_string(),
         _ => "/".to_string(),
     };
-    const SKIP: [&str; 6] = [
+    const SKIP: [&str; 7] = [
         "connection",
         "keep-alive",
         "transfer-encoding",
         "upgrade",
         "authorization",
         "x-gateway-token",
+        "x-gateway-caller",
     ];
     let mut fwd = std::collections::HashMap::new();
     for (k, v) in headers.iter() {
@@ -462,7 +546,14 @@ async fn channel_roundtrip(
         let inner = app.inner.read().await;
         (inner.gateway_token.clone(), inner.bootstrap_token.clone())
     };
-    let src = format!("channel-{}", caller_label(&token, &gateway_t, &bootstrap_t));
+    let src = caller_display_channel(
+        &app,
+        &token,
+        &gateway_t,
+        &bootstrap_t,
+        headers.get("x-gateway-caller").and_then(|v| v.to_str().ok()),
+    )
+    .await;
     let started = std::time::Instant::now();
     let method_s = method.to_string();
     let status;

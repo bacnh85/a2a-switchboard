@@ -17,6 +17,16 @@ Peers present their token as `Authorization: Bearer <token>` (or the
 `X-Gateway-Token` header). The switchboard never forwards caller credentials
 to upstream peers; it substitutes each peer's registered `upstream_token`.
 
+**Caller attribution:** `/register` issues each peer a unique `caller_token`.
+It is returned **once when issued** (first registration, or the first
+post-upgrade heartbeat for pre-upgrade peers); it is **never re-disclosed**
+on later heartbeats. If lost, deregister and re-register to obtain a fresh
+one. Presenting it as `Authorization: Bearer <caller_token>` on `/peer/*`
+calls authenticates AND attributes the request to that peer's name in the
+routing log/dashboard — works even from raw curl. Additionally, a caller may
+send `X-Gateway-Caller: <name>` (advisory, e.g. pi-a2a's `selfIdentity`); it
+is clamped to 64 chars and always stripped before forwarding.
+
 ## 1. Register a peer
 
 ```
