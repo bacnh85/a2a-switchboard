@@ -1,0 +1,17 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>Settings</h1>
+<section class="card">
+  <h2>Gateway API token</h2>
+  <p>Peers authenticate with this token. Registering with it puts them in the pending queue.</p>
+  <code class="token">{{gateway_token}}</code>
+</section>
+<section class="card">
+  <h2>Bootstrap token</h2>
+  <p>Peers presenting this token at <code>/register</code> are accepted automatically. Keep it private or rotate it.</p>
+  <code class="token">{{bootstrap_token}}</code>
+  <form method="post" action="/settings/bootstrap/regenerate">
+    <button class="btn btn-danger">Regenerate bootstrap token</button>
+  </form>
+</section>
+{% endblock %}

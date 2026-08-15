@@ -1,0 +1,59 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>Peers</h1>
+
+{% if !pending.is_empty() %}
+<h2>Pending approval</h2>
+<table class="tbl">
+  <thead><tr><th>name</th><th>url</th><th>registered</th><th></th></tr></thead>
+  <tbody>
+  {% for p in pending %}
+  <tr>
+    <td>{{p.name}}</td><td class="mono">{{p.url}}</td><td>{{p.registered_at}}</td>
+    <td class="actions">
+      <form method="post" action="/peers/{{p.name}}/accept"><button class="btn btn-primary">Accept</button></form>
+      <form method="post" action="/peers/{{p.name}}/reject"><button class="btn">Reject</button></form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Accepted</h2>
+<table class="tbl">
+  <thead><tr><th>name</th><th>url</th><th>health</th><th>last seen</th><th>source</th><th></th></tr></thead>
+  <tbody>
+  {% for p in accepted %}
+  <tr>
+    <td>{{p.name}}</td><td class="mono">{{p.url}}</td>
+    <td>{% if p.healthy == Some(true) %}<span class="ok">healthy</span>{% else %}<span class="bad">unreachable</span>{% endif %}</td>
+    <td>{% if let Some(t) = p.last_seen %}{{t}}{% else %}—{% endif %}</td>
+    <td>{% if p.auto_accepted %}bootstrap{% else %}manual{% endif %}</td>
+    <td class="actions">
+      <form method="post" action="/peers/{{p.name}}/revoke"><button class="btn">Revoke</button></form>
+    </td>
+  </tr>
+  {% endfor %}
+  {% if accepted.is_empty() %}<tr><td colspan="6" class="empty">No accepted peers yet.</td></tr>{% endif %}
+  </tbody>
+</table>
+
+{% if !revoked.is_empty() %}
+<h2>Revoked</h2>
+<table class="tbl">
+  <thead><tr><th>name</th><th>url</th><th></th></tr></thead>
+  <tbody>
+  {% for p in revoked %}
+  <tr>
+    <td>{{p.name}}</td><td class="mono">{{p.url}}</td>
+    <td class="actions">
+      <form method="post" action="/peers/{{p.name}}/accept"><button class="btn">Re-accept</button></form>
+      <form method="post" action="/peers/{{p.name}}/delete"><button class="btn btn-danger">Delete</button></form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

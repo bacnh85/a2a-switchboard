@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}} · agent-gateway</title>
+<link rel="stylesheet" href="/assets/app.css">
+<script src="/assets/vendor/htmx.min.js"></script>
+<script src="/assets/vendor/sse.js" defer></script>
+</head>
+<body hx-ext="sse" sse-connect="/api/events">
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/"><span class="brand-mark">◈</span> agent-gateway</a>
+    <nav>
+      <a href="/" class="nav-link{% if active_nav == "dashboard" %} active{% endif %}">Dashboard</a>
+      <a href="/peers" class="nav-link{% if active_nav == "peers" %} active{% endif %}">Peers</a>
+      <a href="/logs" class="nav-link{% if active_nav == "logs" %} active{% endif %}">Logs</a>
+      <a href="/graph" class="nav-link{% if active_nav == "graph" %} active{% endif %}">Graph</a>
+      <a href="/settings" class="nav-link{% if active_nav == "settings" %} active{% endif %}">Settings</a>
+    </nav>
+  </div>
+</header>
+{% if !localhost %}
+<div class="banner banner-warn" role="alert">
+  Admin UI is unauthenticated and bound to a non-localhost interface. Anyone on this network can accept peers and read tokens. Restrict access at your TLS terminator or firewall.
+</div>
+{% endif %}
+<main class="content">
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

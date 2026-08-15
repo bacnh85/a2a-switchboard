@@ -1,0 +1,28 @@
+[package]
+name = "agent-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted A2A gateway with peer admission control, routing log and communication graph"
+license = "Apache-2.0"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+askama = "0.14"
+rust-embed = "8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+subtle = "2"
+sha2 = "0.10"
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
+url = "2"
+anyhow = "1"
+futures-util = "0.3"
+async-stream = "0.3"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -1,0 +1,5 @@
+# agent-gateway configuration (copy to config.toml)
+[server]
+bind = "127.0.0.1:9920"   # widen ONLY behind a TLS terminator; admin UI is unauthenticated
+data_dir = "data"
+heartbeat_sec = 30        # peer health probe interval

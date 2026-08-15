@@ -1,0 +1,22 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<div class="stats">
+  <div class="stat"><span class="stat-num">{{accepted}}</span><span class="stat-label">accepted peers</span></div>
+  <div class="stat"><span class="stat-num">{{healthy}}</span><span class="stat-label">healthy</span></div>
+  <div class="stat"><span class="stat-num">{{pending}}</span><span class="stat-label">pending approval</span></div>
+  <div class="stat"><span class="stat-num">{{revoked}}</span><span class="stat-label">revoked</span></div>
+  <div class="stat"><span class="stat-num">{{total_routes}}</span><span class="stat-label">routed (ring)</span></div>
+</div>
+<h2>Recent routing</h2>
+<div sse-swap="route" hx-swap="beforeend">
+<table class="tbl">
+  <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>ms</th></tr></thead>
+  <tbody id="routes">
+  {% for e in recent %}
+    <tr><td>{{e.ts}}</td><td>{{e.src}}</td><td>{{e.dst}}</td><td>{{e.method}}</td><td>{{e.status}}</td><td>{{e.latency_ms}}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
