@@ -283,16 +283,18 @@ async fn channel_roundtrip_full() {
     }
     let env = env.expect("request envelope not delivered");
     let id = env["id"].as_u64().unwrap();
+    let secret = env["chan_secret"].as_str().unwrap().to_string();
     assert_eq!(env["method"], "POST");
     let body_in = decode(env["body_b64"].as_str().unwrap());
     assert_eq!(body_in, r#"{"ping":1}"#);
 
-    // Peer posts the response.
+    // Peer posts the response — echoing the per-channel secret.
     let resp_json = serde_json::json!({
         "id": id,
         "status": 200,
         "headers": {"content-type": "application/json"},
         "body_b64": base64::engine::general_purpose::STANDARD.encode("echo:ok"),
+        "chan_secret": secret,
     });
     let r = router
         .clone()
@@ -310,6 +312,90 @@ async fn channel_roundtrip_full() {
     // Routing log records the channel path.
     let log = app.recent_log(10).await;
     assert!(log.iter().any(|e| e.dst == "fw" && e.src.starts_with("channel-") && e.status == 200));
+}
+
+
+#[tokio::test]
+async fn channel_impersonation_rejected() {
+    // Two peers share the bootstrap token. Peer B must not answer peer A's
+    // pending request even when declaring name=A (secret binding).
+    let (router, _app, _gw, boot) = test_app().await;
+    for n in ["pa", "pb"] {
+        let reg = serde_json::json!({"name": n, "url": "http://127.0.0.1:1/"}).to_string();
+        let _ = router.clone().oneshot(req("POST", "/register", Some(&boot), Some(&reg))).await.unwrap();
+    }
+    // A opens a channel.
+    let sse = router.clone().oneshot(req("GET", "/channel?name=pa", Some(&boot), None)).await.unwrap();
+    let mut stream = sse.into_body().into_data_stream();
+    // deliver a request to A
+    let router2 = router.clone();
+    let boot2 = boot.clone();
+    let call = tokio::spawn(async move {
+        router2.oneshot(req("POST", "/peer/pa", Some(&boot2), Some("{}"))).await.unwrap()
+    });
+    use futures_util::StreamExt;
+    let mut env = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && env.is_none() {
+        if let Some(Ok(chunk)) = stream.next().await {
+            let text = String::from_utf8_lossy(&chunk);
+            if text.contains("event: request") {
+                env = serde_json::from_str(text.split("data: ").nth(1).unwrap_or_default().trim()).ok();
+            }
+        }
+    }
+    let env: serde_json::Value = env.expect("envelope");
+    let id = env["id"].as_u64().unwrap();
+    // B responds for A's id with the WRONG secret (B never opened a channel,
+    // so it cannot know A's secret — use a bogus one).
+    let resp = serde_json::json!({
+        "id": id, "status": 200, "headers": {},
+        "body_b64": "", "chan_secret": "deadbeef",
+    });
+    let r = router.clone().oneshot(req("POST", &format!("/channel/response/{id}?name=pa"), Some(&boot), Some(&resp.to_string()))).await.unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND, "B must not resolve A's request");
+    // A's caller still hangs → drop A's channel → immediate 502.
+    drop(stream);
+    let out = call.await.unwrap();
+    assert_eq!(out.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn channel_oversized_response_rejected() {
+    let (router, _app, _gw, boot) = test_app().await;
+    let reg = r#"{"name":"big","url":"http://127.0.0.1:1/"}"#;
+    let _ = router.clone().oneshot(req("POST", "/register", Some(&boot), Some(reg))).await.unwrap();
+    let sse = router.clone().oneshot(req("GET", "/channel?name=big", Some(&boot), None)).await.unwrap();
+    let mut stream = sse.into_body().into_data_stream();
+    let router2 = router.clone();
+    let boot2 = boot.clone();
+    let call = tokio::spawn(async move {
+        router2.oneshot(req("POST", "/peer/big", Some(&boot2), Some("{}"))).await.unwrap()
+    });
+    use futures_util::StreamExt;
+    let mut env = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && env.is_none() {
+        if let Some(Ok(chunk)) = stream.next().await {
+            let text = String::from_utf8_lossy(&chunk);
+            if text.contains("event: request") {
+                env = serde_json::from_str(text.split("data: ").nth(1).unwrap_or_default().trim()).ok();
+            }
+        }
+    }
+    let env: serde_json::Value = env.expect("envelope");
+    let id = env["id"].as_u64().unwrap();
+    let secret = env["chan_secret"].as_str().unwrap().to_string();
+    // 5MB base64 → rejected BEFORE decode.
+    let resp = serde_json::json!({
+        "id": id, "status": 200, "headers": {},
+        "body_b64": "A".repeat(5_500_000),
+        "chan_secret": secret,
+    });
+    let r = router.clone().oneshot(req("POST", &format!("/channel/response/{id}?name=big"), Some(&boot), Some(&resp.to_string()))).await.unwrap();
+    assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    drop(stream);
+    let _ = call.await;
 }
 
 #[tokio::test]

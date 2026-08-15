@@ -409,16 +409,29 @@ async fn channel_roundtrip(
 }
 
 /// Decode a channel response into an axum Response with the same header
-/// filtering as the direct path.
+/// filtering as the direct path. Size-capped before decode (OOM guard).
 fn decode_channel_resp(resp: crate::channel::RespEnvelope) -> Response {
     use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&resp.body_b64)
-        .unwrap_or_default();
+    if resp.body_b64.len() > crate::channel::MAX_CHANNEL_BODY * 4 / 3 + 4 {
+        return err(StatusCode::PAYLOAD_TOO_LARGE, "channel response too large");
+    }
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(&resp.body_b64) {
+        Ok(b) if b.len() <= crate::channel::MAX_CHANNEL_BODY => b,
+        _ => return err(StatusCode::PAYLOAD_TOO_LARGE, "channel response too large"),
+    };
+    // RFC 9110 hop-by-hop + auth-challenge headers never reach the caller.
+    const RESPONSE_SKIP: [&str; 8] = [
+        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+        "te", "trailers", "transfer-encoding", "upgrade",
+    ];
     let mut headers = axum::http::HeaderMap::new();
     for (k, v) in &resp.headers {
         let lower = k.to_lowercase();
-        if lower == "transfer-encoding" || lower == "content-length" || lower == "connection" {
+        if RESPONSE_SKIP.contains(&lower.as_str())
+            || lower == "content-length"
+            || lower == "set-cookie"
+            || lower == "www-authenticate"
+        {
             continue;
         }
         if let (Ok(hn), Ok(hv)) = (
