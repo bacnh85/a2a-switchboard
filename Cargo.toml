@@ -1,6 +1,6 @@
 [package]
 name = "a2a-switchboard"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Self-hosted A2A (Agent2Agent) switchboard: manual peer admission, token exchange, traffic proxying, firewall-friendly reverse channels — single binary with admin UI"
 license = "Apache-2.0"

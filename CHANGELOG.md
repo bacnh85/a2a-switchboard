@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-15
 
 ### Added
 
@@ -38,6 +38,8 @@ All notable changes to this project are documented in this file.
   limiting keys silently saw `unknown` in production (tests injected the raw
   extension and masked it). Now reads `ConnectInfo<SocketAddr>` (with
   fallback).
+
+## [Unreleased]
 
 ## [0.1.1] - 2026-08-15
 
