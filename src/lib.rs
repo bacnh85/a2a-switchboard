@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod channel;
 pub mod auth;
 pub mod config;
 pub mod health;
@@ -33,11 +34,13 @@ async fn asset(axum::extract::Path(path): axum::extract::Path<String>) -> impl a
 
 pub fn router(app: Arc<App>) -> axum::Router {
     Router::new()
-        .route("/register", post(peers::register))
+        .route("/register", post(peers::register).delete(peers::deregister))
         .route("/.well-known/agent.json", get(peers::agent_card))
         .route("/.well-known/agent-card.json", get(peers::agent_card))
         .route("/peer/{name}", axum::routing::any(peers::proxy))
         .route("/peer/{name}/{*rest}", axum::routing::any(peers::proxy))
+        .route("/channel", get(channel::channel_open))
+        .route("/channel/response/{id}", post(channel::channel_response))
         .route("/api/events", get(admin::sse_events))
         .route("/api/graph", get(admin::graph_data))
         .route("/", get(admin::dashboard))

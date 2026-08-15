@@ -201,6 +201,118 @@ async fn proxy_roundtrip_and_log() {
 }
 
 #[tokio::test]
+async fn proxy_subpath_roundtrip() {
+    // /peer/{name}/{rest} must reach the upstream's subpath (regression:
+    // Path<String> extractor crashed with 2 segments).
+    let fake = axum::Router::new()
+        .route("/.well-known/agent-card.json", axum::routing::get(|| async {
+            axum::Json(serde_json::json!({"name":"fake"}))
+        }))
+        .route("/", axum::routing::post(|| async { "ok" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+    let (router, _app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/register", Some(&boot), Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#))))
+        .await
+        .unwrap();
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peer/fake/.well-known/agent-card.json", Some(&boot), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    assert!(body.windows(4).any(|w| w == b"fake"));
+}
+
+fn decode(b64: &str) -> String {
+    use base64::Engine as _;
+    String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b64).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn channel_roundtrip_full() {
+    // Register a peer with an UNROUTABLE url — proves the channel path, not
+    // direct HTTP, carries the request.
+    let (router, app, _gw, boot) = test_app().await;
+    let reg = format!(r#"{{"name":"fw","url":"http://127.0.0.1:1/"}}"#);
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/register", Some(&boot), Some(&reg)))
+        .await
+        .unwrap();
+
+    // channel=false in directory before connect
+    let r = router.clone().oneshot(req("GET", "/.well-known/agent.json", Some(&boot), None)).await.unwrap();
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    assert!(String::from_utf8_lossy(&b).contains(r#""channel":false"#));
+
+    // Open the channel as the peer (SSE).
+    let sse = router.clone().oneshot(req("GET", "/channel", Some(&boot), None)).await.unwrap();
+    assert_eq!(sse.status(), StatusCode::OK);
+    let mut stream = sse.into_body().into_data_stream();
+
+    // Caller posts /peer/fw concurrently.
+    let router2 = router.clone();
+    let boot2 = boot.clone();
+    let call = tokio::spawn(async move {
+        router2
+            .oneshot(req("POST", "/peer/fw", Some(&boot2), Some(r#"{"ping":1}"#)))
+            .await
+            .unwrap()
+    });
+
+    // Read SSE chunks until a request envelope appears.
+    use futures_util::StreamExt;
+    use base64::Engine as _;
+    let mut env: Option<serde_json::Value> = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && env.is_none() {
+        if let Some(Ok(chunk)) = stream.next().await {
+            let text = String::from_utf8_lossy(&chunk);
+            if text.contains("event: request") {
+                let data = text.split("data: ").nth(1).unwrap_or_default().trim();
+                env = serde_json::from_str(data).ok();
+            }
+        }
+    }
+    let env = env.expect("request envelope not delivered");
+    let id = env["id"].as_u64().unwrap();
+    assert_eq!(env["method"], "POST");
+    let body_in = decode(env["body_b64"].as_str().unwrap());
+    assert_eq!(body_in, r#"{"ping":1}"#);
+
+    // Peer posts the response.
+    let resp_json = serde_json::json!({
+        "id": id,
+        "status": 200,
+        "headers": {"content-type": "application/json"},
+        "body_b64": base64::engine::general_purpose::STANDARD.encode("echo:ok"),
+    });
+    let r = router
+        .clone()
+        .oneshot(req("POST", &format!("/channel/response/{id}"), Some(&boot), Some(&resp_json.to_string())))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // Caller received the echoed response.
+    let out = call.await.unwrap();
+    assert_eq!(out.status(), StatusCode::OK);
+    let b = axum::body::to_bytes(out.into_body(), 65536).await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&b), "echo:ok");
+
+    // Routing log records the channel path.
+    let log = app.recent_log(10).await;
+    assert!(log.iter().any(|e| e.dst == "fw" && e.src.starts_with("channel-") && e.status == 200));
+}
+
+#[tokio::test]
 async fn sse_stream_delivers_route_events() {
     let fake = axum::Router::new().route("/", axum::routing::post(|| async { "ok" }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

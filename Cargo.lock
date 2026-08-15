@@ -10,6 +10,7 @@ dependencies = [
  "askama",
  "async-stream",
  "axum",
+ "base64",
  "futures-util",
  "rand 0.9.5",
  "reqwest",

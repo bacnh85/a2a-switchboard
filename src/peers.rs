@@ -1,14 +1,15 @@
 use crate::auth::{classify_token, extract_token, forbidden, too_many, unauthorized, ClientIp, TokenKind};
 use crate::state::{fingerprint, now, validate_url, AppState, Peer, PeerState};
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
 const MAX_PROXY_BYTES: usize = 4 * 1024 * 1024;
-const PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+// Must exceed pi-a2a replyTimeoutSec (default 300s) — agent tasks run long.
+const PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn err(status: StatusCode, msg: &str) -> Response {
     (status, msg.to_string()).into_response()
@@ -104,6 +105,42 @@ pub async fn register(
     (StatusCode::CREATED, Json(serde_json::json!({"status": "registered", "peer": name, "state": s}))).into_response()
 }
 
+/// DELETE /register — deregister the calling peer (matched by token fingerprint + name).
+pub async fn deregister(
+    State(app): State<AppState>,
+    ClientIp(client_ip): ClientIp,
+    headers: HeaderMap,
+    Query(q): Query<DeregQuery>,
+) -> Response {
+    if !app.limiter.allow(&client_ip, 20) {
+        return too_many();
+    }
+    let Some(token) = extract_token(&headers) else { return unauthorized() };
+    let (gateway, bootstrap) = {
+        let inner = app.inner.read().await;
+        (inner.gateway_token.clone(), inner.bootstrap_token.clone())
+    };
+    if classify_token(&token, &gateway, &bootstrap).is_none() {
+        return unauthorized();
+    }
+    let fp = fingerprint(&token);
+    let mut inner = app.inner.write().await;
+    let before = inner.peers.len();
+    inner.peers.retain(|p| !(p.name == q.name && p.fingerprint == fp));
+    let removed = before - inner.peers.len();
+    drop(inner);
+    app.persist().await;
+    if removed == 0 {
+        return err(StatusCode::NOT_FOUND, "no such peer registered by this identity");
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status": "deregistered", "peer": q.name}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct DeregQuery {
+    pub name: String,
+}
+
 /// Stable label for a caller in the routing log. With a shared token this is
 /// token-class attribution only (see plan: per-peer tokens are the v2 upgrade).
 pub fn caller_label(token: &str, gateway: &str, bootstrap: &str) -> String {
@@ -132,6 +169,7 @@ pub async fn agent_card(State(app): State<AppState>, headers: HeaderMap) -> Resp
                 "name": p.name,
                 "url": format!("/peer/{}/", p.name),
                 "healthy": p.healthy,
+                "channel": app.channels.has(&p.name),
             });
             if authed {
                 v["capabilities"] = p.card.get("capabilities").cloned().unwrap_or(serde_json::Value::Null);
@@ -162,15 +200,24 @@ pub async fn agent_card(State(app): State<AppState>, headers: HeaderMap) -> Resp
 pub async fn proxy(
     State(app): State<AppState>,
     ClientIp(client_ip): ClientIp,
-    Path(name): Path<String>,
+    uri: Uri,
     headers: HeaderMap,
     method: axum::http::Method,
-    uri: Uri,
     body: Bytes,
 ) -> Response {
     if !app.limiter.allow(&client_ip, 120) {
         return too_many();
     }
+    // /peer/{name}[/rest…] — parse the name from the raw path; works for both
+    // the single-segment and wildcard routes without a Path extractor.
+    let name = uri
+        .path()
+        .strip_prefix("/peer/")
+        .unwrap_or_default()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
     let Some(token) = extract_token(&headers) else { return unauthorized() };
     let (gateway, bootstrap) = {
         let inner = app.inner.read().await;
@@ -194,10 +241,16 @@ pub async fn proxy(
         return err(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
     }
 
+    // Dual-mode: firewalled peers hold a reverse channel — deliver there.
+    if app.channels.has(&name) {
+        return channel_roundtrip(app, name, token, uri, method, headers, body).await;
+    }
+
     // /peer/{name}/{rest} → {pinned-url}/{rest}; query string preserved.
-    let prefix = format!("/peer/{name}");
-    let rest_path = uri.path().strip_prefix(&prefix).unwrap_or_default().to_string();
-    let rest_path = if rest_path.is_empty() { "/".to_string() } else { rest_path };
+    let rest_path = match uri.path().strip_prefix(&format!("/peer/{name}")) {
+        Some(r) if !r.is_empty() => r.to_string(),
+        _ => "/".to_string(),
+    };
     let target = format!("{}{}{}", url.trim_end_matches('/'), rest_path, uri.query().map(|q| format!("?{q}")).unwrap_or_default());
 
     let src = caller_label(&token, &gateway, &bootstrap);
@@ -284,4 +337,97 @@ pub async fn proxy(
             err(StatusCode::BAD_GATEWAY, &format!("upstream unreachable: {e}"))
         }
     }
+}
+
+
+/// Channel-mode proxying: wrap the request as an envelope, push it down the
+/// peer's own outbound SSE stream, await the correlated response POST.
+async fn channel_roundtrip(
+    app: AppState,
+    name: String,
+    token: String,
+    uri: Uri,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use base64::Engine as _;
+    let rest = match uri.path().strip_prefix(&format!("/peer/{name}")) {
+        Some(r) if !r.is_empty() => r.to_string(),
+        _ => "/".to_string(),
+    };
+    const SKIP: [&str; 6] = ["connection", "keep-alive", "transfer-encoding", "upgrade", "authorization", "x-gateway-token"];
+    let mut fwd = std::collections::HashMap::new();
+    for (k, v) in headers.iter() {
+        let lower = k.as_str().to_lowercase();
+        if SKIP.contains(&lower.as_str()) || lower == "host" || lower == "content-length" {
+            continue;
+        }
+        if let Ok(vs) = v.to_str() {
+            fwd.insert(lower, vs.to_string());
+        }
+    }
+    let head = crate::channel::EnvelopeHead {
+        method: method.to_string(),
+        path: rest,
+        query: uri.query().map(|q| q.to_string()),
+        headers: fwd,
+        body_b64: base64::engine::general_purpose::STANDARD.encode(&body),
+    };
+    let (gateway_t, bootstrap_t) = {
+        let inner = app.inner.read().await;
+        (inner.gateway_token.clone(), inner.bootstrap_token.clone())
+    };
+    let src = format!("channel-{}", caller_label(&token, &gateway_t, &bootstrap_t));
+    let started = std::time::Instant::now();
+    let method_s = method.to_string();
+    let status;
+    let out = if let Some(rx) = app.channels.deliver(&name, head) {
+        match tokio::time::timeout(PROXY_TIMEOUT, rx).await {
+            Ok(Ok(resp)) => {
+                status = resp.status;
+                decode_channel_resp(resp)
+            }
+            Ok(Err(_)) => { status = 502; err(StatusCode::BAD_GATEWAY, "peer channel closed") }
+            Err(_) => { status = 504; err(StatusCode::GATEWAY_TIMEOUT, "peer channel timeout") }
+        }
+    } else {
+        status = 502;
+        err(StatusCode::BAD_GATEWAY, "peer channel send failed")
+    };
+    app.log_route(crate::state::RouteEntry {
+        ts: now(),
+        src,
+        dst: name,
+        method: method_s,
+        status,
+        bytes: body.len() as u64,
+        latency_ms: started.elapsed().as_millis() as u64,
+    })
+    .await;
+    out
+}
+
+/// Decode a channel response into an axum Response with the same header
+/// filtering as the direct path.
+fn decode_channel_resp(resp: crate::channel::RespEnvelope) -> Response {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&resp.body_b64)
+        .unwrap_or_default();
+    let mut headers = axum::http::HeaderMap::new();
+    for (k, v) in &resp.headers {
+        let lower = k.to_lowercase();
+        if lower == "transfer-encoding" || lower == "content-length" || lower == "connection" {
+            continue;
+        }
+        if let (Ok(hn), Ok(hv)) = (
+            axum::http::HeaderName::from_bytes(lower.as_bytes()),
+            axum::http::HeaderValue::from_str(v),
+        ) {
+            headers.insert(hn, hv);
+        }
+    }
+    let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    (status, headers, bytes).into_response()
 }

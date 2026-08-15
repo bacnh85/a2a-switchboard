@@ -96,6 +96,8 @@ pub struct App {
     pub log_tx: broadcast::Sender<RouteEntry>,
     pub limiter: RateLimiter,
     pub http: reqwest::Client,
+    /// Reverse channels: firewalled peers hold outbound SSE connections here.
+    pub channels: crate::channel::Channels,
 }
 
 pub type AppState = Arc<App>;
@@ -145,6 +147,7 @@ impl App {
             log_tx,
             limiter: RateLimiter::default(),
             http,
+            channels: crate::channel::Channels::new(),
         })
     }
 
