@@ -656,7 +656,11 @@ async fn admin_password_flow() {
     let (router, app, _, _) = test_app().await;
 
     // no password set: UI open
-    let r = router.clone().oneshot(req("GET", "/", None, None)).await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/", None, None))
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
 
     // set password (test ClientIp is localhost)
@@ -673,7 +677,11 @@ async fn admin_password_flow() {
     assert!(app.admin_set().await);
 
     // now locked
-    let r = router.clone().oneshot(req("GET", "/", None, None)).await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/", None, None))
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
     assert_eq!(r.headers().get("location").unwrap(), "/login");
     let r = router
@@ -757,7 +765,10 @@ async fn login_rate_limited() {
         .unwrap();
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("too many attempts"), "expected rate-limit error");
+    assert!(
+        html.contains("too many attempts"),
+        "expected rate-limit error"
+    );
 }
 
 #[tokio::test]
@@ -875,8 +886,10 @@ async fn channel_caller_header_drops_prefix() {
     let boot2 = boot.clone();
     let call = tokio::spawn(async move {
         let mut r = req("POST", "/peer/fw2", Some(&boot2), Some(r#"{"ping":1}"#));
-        r.headers_mut()
-            .insert("x-gateway-caller", axum::http::HeaderValue::from_static("alice"));
+        r.headers_mut().insert(
+            "x-gateway-caller",
+            axum::http::HeaderValue::from_static("alice"),
+        );
         router2.oneshot(r).await.unwrap()
     });
 
@@ -919,7 +932,9 @@ async fn channel_caller_header_drops_prefix() {
 
     let log = app.recent_log(10).await;
     // src is the bare caller name — NO channel- prefix (matches a peer node).
-    assert!(log.iter().any(|e| e.dst == "fw2" && e.src == "alice" && e.status == 200));
+    assert!(log
+        .iter()
+        .any(|e| e.dst == "fw2" && e.src == "alice" && e.status == 200));
 }
 
 #[tokio::test]
@@ -962,7 +977,10 @@ async fn per_peer_caller_token_attribution() {
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let ct2 = v["caller_token"].as_str().unwrap().to_string();
-    assert!(ct2.starts_with("agw_"), "token minted on upgrade re-register");
+    assert!(
+        ct2.starts_with("agw_"),
+        "token minted on upgrade re-register"
+    );
 
     // Repeat heartbeat: token NOT re-disclosed (already minted) — prevents
     // shared-token holders from harvesting another peer's caller token.
@@ -1024,19 +1042,22 @@ async fn peer_caller_token_authz_boundary() {
         ))
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "caller token must not register");
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "caller token must not register"
+    );
 
     let r = router
         .clone()
-        .oneshot(req(
-            "DELETE",
-            "/register?name=az-peer",
-            Some(&ct),
-            None,
-        ))
+        .oneshot(req("DELETE", "/register?name=az-peer", Some(&ct), None))
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "caller token must not deregister");
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "caller token must not deregister"
+    );
 
     let r = router
         .clone()
@@ -1045,7 +1066,11 @@ async fn peer_caller_token_authz_boundary() {
         .unwrap();
     // Channel binding is fingerprint-based; a caller token's fingerprint does
     // not match the registration token → rejected (403), never opened.
-    assert_ne!(r.status(), StatusCode::OK, "caller token must not open channels");
+    assert_ne!(
+        r.status(),
+        StatusCode::OK,
+        "caller token must not open channels"
+    );
 }
 
 #[tokio::test]
@@ -1082,7 +1107,10 @@ async fn update_response_reports_real_state() {
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["status"], "updated");
-    assert_eq!(v["state"], "pending", "update response must reflect real admission state");
+    assert_eq!(
+        v["state"], "pending",
+        "update response must reflect real admission state"
+    );
 
     // Accept, then re-register again → reports accepted.
     let r = router
@@ -1165,5 +1193,8 @@ async fn sse_stream_terminates_after_logout() {
             break;
         }
     }
-    assert!(terminated, "SSE stream must terminate after logout (session invalid)");
+    assert!(
+        terminated,
+        "SSE stream must terminate after logout (session invalid)"
+    );
 }

@@ -26,7 +26,14 @@ fn login_error(msg: &str) -> Response {
 }
 
 pub async fn login_page() -> Response {
-    Html(LoginTmpl { error: String::new() }.render().unwrap_or_default()).into_response()
+    Html(
+        LoginTmpl {
+            error: String::new(),
+        }
+        .render()
+        .unwrap_or_default(),
+    )
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -72,9 +79,12 @@ pub fn session_response(resp: impl IntoResponse, token: String) -> Response {
     let (mut parts, body) = resp.into_parts();
     parts.headers.insert(
         header::SET_COOKIE,
-        format!("{COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}", crate::state::SESSION_TTL)
-            .parse()
-            .unwrap(),
+        format!(
+            "{COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+            crate::state::SESSION_TTL
+        )
+        .parse()
+        .unwrap(),
     );
     Response::from_parts(parts, body)
 }

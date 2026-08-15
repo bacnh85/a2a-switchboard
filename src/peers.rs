@@ -100,10 +100,7 @@ pub async fn register(
                 .upstream_token
                 .clone()
                 .or_else(|| existing.upstream_token.clone()),
-            caller_token: existing
-                .caller_token
-                .clone()
-                .or_else(|| Some(gen_token())),
+            caller_token: existing.caller_token.clone().or_else(|| Some(gen_token())),
             ..existing.clone()
         };
         inner.peers[idx] = peer;
@@ -217,7 +214,11 @@ pub fn caller_label(token: &str, gateway: &str, bootstrap: &str) -> String {
 
 async fn inner2(app: &AppState, name: &str) -> Option<String> {
     let inner = app.inner.read().await;
-    inner.peers.iter().find(|p| p.name == name).and_then(|p| p.caller_token.clone())
+    inner
+        .peers
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.caller_token.clone())
 }
 
 /// True when the token is the gateway/bootstrap token OR a peer's caller token.
@@ -244,11 +245,20 @@ async fn peer_from_token(app: &AppState, token: &str) -> Option<String> {
 
 /// Channel-path variant: per-peer token → name (no prefix); else header; else
 /// `channel-<label>` fallback so channel delivery stays visible.
-async fn caller_display_channel(app: &AppState, token: &str, gw: &str, boot: &str, header: Option<&str>) -> String {
+async fn caller_display_channel(
+    app: &AppState,
+    token: &str,
+    gw: &str,
+    boot: &str,
+    header: Option<&str>,
+) -> String {
     if let Some(name) = peer_from_token(app, token).await {
         return name;
     }
-    match header.map(str::trim).filter(|h| !h.is_empty() && h.len() <= 64) {
+    match header
+        .map(str::trim)
+        .filter(|h| !h.is_empty() && h.len() <= 64)
+    {
         Some(name) => name.to_string(),
         None => format!("channel-{}", caller_label(token, gw, boot)),
     }
@@ -257,12 +267,21 @@ async fn caller_display_channel(app: &AppState, token: &str, gw: &str, boot: &st
 /// Display-name attribution for the routing log: an `X-Gateway-Caller` header
 /// (e.g. pi-a2a's selfIdentity) when the caller provides one, else the stable
 /// fingerprint label. Advisory only — same trust level as the shared token.
-async fn caller_display(app: &AppState, token: &str, gateway: &str, bootstrap: &str, header: Option<&str>) -> String {
+async fn caller_display(
+    app: &AppState,
+    token: &str,
+    gateway: &str,
+    bootstrap: &str,
+    header: Option<&str>,
+) -> String {
     // Highest confidence: a per-peer caller token identifies the peer exactly.
     if let Some(name) = peer_from_token(app, token).await {
         return name;
     }
-    match header.map(str::trim).filter(|h| !h.is_empty() && h.len() <= 64) {
+    match header
+        .map(str::trim)
+        .filter(|h| !h.is_empty() && h.len() <= 64)
+    {
         Some(name) => name.to_string(),
         None => caller_label(token, gateway, bootstrap),
     }
@@ -391,7 +410,9 @@ pub async fn proxy(
         &token,
         &gateway,
         &bootstrap,
-        headers.get("x-gateway-caller").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-gateway-caller")
+            .and_then(|v| v.to_str().ok()),
     )
     .await;
     let started = std::time::Instant::now();
@@ -551,7 +572,9 @@ async fn channel_roundtrip(
         &token,
         &gateway_t,
         &bootstrap_t,
-        headers.get("x-gateway-caller").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-gateway-caller")
+            .and_then(|v| v.to_str().ok()),
     )
     .await;
     let started = std::time::Instant::now();
