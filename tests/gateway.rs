@@ -327,7 +327,7 @@ async fn channel_roundtrip_full() {
     // Register a peer with an UNROUTABLE url — proves the channel path, not
     // direct HTTP, carries the request.
     let (router, app, _gw, boot) = test_app().await;
-    let reg = format!(r#"{{"name":"fw","url":"http://127.0.0.1:1/"}}"#);
+    let reg = r#"{"name":"fw","url":"http://127.0.0.1:1/"}"#.to_string();
     let _ = router
         .clone()
         .oneshot(req("POST", "/register", Some(&boot), Some(&reg)))
