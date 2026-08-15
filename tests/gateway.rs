@@ -632,11 +632,15 @@ impl WithHeader for Request<Body> {
 }
 
 fn form_req(method: &str, uri: &str, body: &str) -> Request<Body> {
+    form_req_from(method, uri, body, ([127, 0, 0, 1], 50000))
+}
+
+fn form_req_from(method: &str, uri: &str, body: &str, src: ([u8; 4], u16)) -> Request<Body> {
     Request::builder()
         .method(method)
         .uri(uri)
         .header("content-type", "application/x-www-form-urlencoded")
-        .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 50000)))
+        .extension(std::net::SocketAddr::from(src))
         .body(Body::from(body.to_string()))
         .unwrap()
 }
@@ -744,6 +748,55 @@ async fn admin_password_flow() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn admin_password_first_set_from_container_bridge_ip() {
+    let (router, app, _, _) = test_app().await;
+
+    // Simulate a podman/docker port-published client: socket source IP is the
+    // bridge gateway (10.88.0.35), never 127.0.0.1. First-time set must work.
+    let r = router
+        .clone()
+        .oneshot(form_req_from(
+            "POST",
+            "/settings/password",
+            "new=bridgepass99&confirm=bridgepass99",
+            ([10, 88, 0, 35], 50000),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert!(app.verify_admin_password("bridgepass99").await);
+
+    // Docker bridge 172.17.0.x also passes; a public IP must still be refused.
+    let (router2, app2, _, _) = test_app().await;
+    let r = router2
+        .clone()
+        .oneshot(form_req_from(
+            "POST",
+            "/settings/password",
+            "new=dockerpass7&confirm=dockerpass7",
+            ([172, 17, 0, 3], 50000),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert!(app2.verify_admin_password("dockerpass7").await);
+
+    let (router3, app3, _, _) = test_app().await;
+    let r = router3
+        .clone()
+        .oneshot(form_req_from(
+            "POST",
+            "/settings/password",
+            "new=publicpass1&confirm=publicpass1",
+            ([8, 8, 8, 8], 50000),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert!(!app3.admin_set().await);
 }
 
 #[tokio::test]

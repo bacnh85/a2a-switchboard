@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- First-time admin password set now works behind podman/docker port
+  publishing: the socket source IP is the container bridge gateway (e.g.
+  10.88.0.35), never 127.0.0.1, so the localhost-only gate rejected it. The
+  gate now accepts loopback plus RFC1918 private ranges (10/8, 172.16/12,
+  192.168/16 — covering podman's 10.88/16 and docker's 172.17/16 bridges),
+  including IPv4-mapped IPv6 (::ffff:a.b.c.d).
+
 ## [0.2.0] - 2026-08-15
 
 ### Added
