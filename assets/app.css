@@ -343,3 +343,41 @@ h2 { font-size: var(--fs-xl); margin: var(--s-4) 0 var(--s-2); }
 
 .muted { color: var(--text-3); font-size: var(--fs-sm); }
 
+/* peer detail + log filter UI */
+.kv { width: 100%; border-collapse: collapse; }
+.kv th, .kv td { text-align: left; padding: 6px var(--s-2); border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.kv th { color: var(--text-2); width: 180px; font-weight: 600; vertical-align: top; }
+
+pre.json {
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  padding: var(--s-2);
+  overflow-x: auto;
+  font-size: var(--fs-xs);
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.filter-bar {
+  display: flex;
+  gap: var(--s-1);
+  align-items: center;
+  margin-bottom: var(--s-2);
+  flex-wrap: wrap;
+}
+.filter-bar input {
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text);
+  min-width: 140px;
+}
+.filter-bar input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.filter-note { margin-left: auto; }
+
+.tbl td a, .kv a { color: var(--accent); }
+details summary { cursor: pointer; font-weight: 600; margin-bottom: var(--s-1); }
+

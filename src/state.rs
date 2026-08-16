@@ -37,12 +37,57 @@ pub struct Peer {
     pub registered_at: i64,
     #[serde(default)]
     pub last_seen: Option<i64>,
+    /// Source IP of the peer's most recent successful exchange (register,
+    /// proxied request, or reverse channel). Captured from the TCP peer
+    /// address; display-only, never used for auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ip: Option<String>,
+    /// Source IP seen at registration time (the address the peer registered
+    /// from). Useful to spot NAT'd/firewalled peers registering via a relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reg_ip: Option<String>,
     #[serde(default)]
     pub healthy: Option<bool>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
     pub auto_accepted: bool,
+}
+
+impl Peer {
+    /// Askama-friendly formatted registration time.
+    pub fn registered_at_dt(&self) -> String {
+        fmt_dt(self.registered_at)
+    }
+    /// Askama-friendly formatted last-seen (empty when never seen).
+    pub fn last_seen_dt(&self) -> String {
+        self.last_seen
+            .map(fmt_dt)
+            .unwrap_or_else(|| "—".to_string())
+    }
+    /// Last-seen IP or placeholder.
+    pub fn last_ip_str(&self) -> String {
+        self.last_ip.clone().unwrap_or_else(|| "—".to_string())
+    }
+    /// Registration source IP or placeholder.
+    pub fn reg_ip_str(&self) -> String {
+        self.reg_ip.clone().unwrap_or_else(|| "—".to_string())
+    }
+    pub fn state_str(&self) -> &'static str {
+        match self.state {
+            PeerState::Pending => "pending",
+            PeerState::Accepted => "accepted",
+            PeerState::Revoked => "revoked",
+        }
+    }
+    /// Short human summary of the agent card (first line of description).
+    pub fn card_summary(&self) -> String {
+        self.card
+            .get("description")
+            .and_then(|d| d.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "no card".to_string())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,7 +100,7 @@ struct Persisted {
     admin: Option<AdminCred>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
     pub ts: i64,
     pub src: String,
@@ -64,6 +109,13 @@ pub struct RouteEntry {
     pub status: u16,
     pub bytes: u64,
     pub latency_ms: u64,
+}
+
+impl RouteEntry {
+    /// Askama-friendly formatted timestamp (local date-time).
+    pub fn ts_dt(&self) -> String {
+        fmt_dt(self.ts)
+    }
 }
 
 #[derive(Default)]
@@ -131,6 +183,29 @@ pub fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+/// Format a unix timestamp as local date-time `YYYY-MM-DD HH:MM:SS`.
+/// Used by templates (Askama can't format dates inline). Pure std, no
+/// chrono dep — keeps the zero-dep runtime story intact.
+pub fn fmt_dt(ts: i64) -> String {
+    let secs = if ts < 0 { 0 } else { ts as u64 };
+    // days since epoch → civil date (Howard Hinnant's algorithm)
+    let days = (secs / 86400) as i64;
+    let rem = (secs % 86400) as i64;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let _ = (m, s);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{m:02}:{s:02}")
 }
 
 pub fn fingerprint(token: &str) -> String {

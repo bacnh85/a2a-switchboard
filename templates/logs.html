@@ -1,13 +1,29 @@
 {% extends "layout.html" %}
 {% block content %}
-<h1>Routing log</h1>
-<p class="muted">Last 200 entries (in-memory ring). Full history: <code>data/routing.jsonl</code>.</p>
+<h1>Communication log</h1>
+
+<form method="get" action="/logs" class="filter-bar">
+  <input type="text" name="src" placeholder="caller contains…" value="{{q_src}}" aria-label="filter by source">
+  <input type="text" name="dst" placeholder="destination contains…" value="{{q_dst}}" aria-label="filter by destination">
+  <input type="text" name="status" placeholder="status (e.g. 200)" value="{{q_status}}" aria-label="filter by status">
+  <button class="btn btn-primary" type="submit">Filter</button>
+  <a class="btn" href="/logs">Clear</a>
+  <span class="muted filter-note">{{total}} matching entries{% if truncated %} (ring capped at 1000 — older history in <code>data/routing.jsonl</code>){% endif %}</span>
+</form>
+
 <table class="tbl">
   <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>
   <tbody>
   {% for e in entries %}
-  <tr><td>{{e.ts}}</td><td>{{e.src}}</td><td>{{e.dst}}</td><td>{{e.method}}</td><td>{{e.status}}</td><td>{{e.bytes}}</td><td>{{e.latency_ms}}</td></tr>
+  <tr><td>{{e.ts_dt()}}</td><td>{{e.src}}</td><td>{{e.dst}}</td><td>{{e.method}}</td><td>{{e.status}}</td><td>{{e.bytes}}</td><td>{{e.latency_ms}}</td></tr>
   {% endfor %}
+  {% if entries.is_empty() %}<tr><td colspan="7" class="empty">No matching entries.</td></tr>{% endif %}
   </tbody>
 </table>
+
+{% if !q_src.is_empty() || !q_dst.is_empty() || !q_status.is_empty() %}
+<p class="muted">Showing filtered history from <code>data/routing.jsonl</code>. <a href="/logs">Clear filters</a> to see the live ring.</p>
+{% else %}
+<p class="muted">Last {{entries.len()}} entries (in-memory ring). Full history: <code>data/routing.jsonl</code> — use the filters above to page through it.</p>
+{% endif %}
 {% endblock %}

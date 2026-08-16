@@ -7,7 +7,7 @@ pub fn is_localhost() -> bool {
     LOCALHOST.load(std::sync::atomic::Ordering::Relaxed)
 }
 use askama::Template;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use std::convert::Infallible;
@@ -42,6 +42,29 @@ pub struct PeersTmpl {
 }
 
 #[derive(Template)]
+#[template(path = "peer_detail.html")]
+pub struct PeerDetailTmpl {
+    pub title: String,
+    pub active_nav: &'static str,
+    pub localhost: bool,
+    pub authed: bool,
+    pub peer: Peer,
+    /// reverse-channel active for this peer (Channels::has)
+    pub channel: bool,
+    pub registered_at: String,
+    pub last_seen: String,
+    /// capabilities array from the card (JSON stringified for display)
+    pub capabilities: String,
+    /// skills array from the card (JSON stringified for display)
+    pub skills: String,
+    pub card_pretty: String,
+    pub traffic: Vec<RouteEntry>,
+    pub traffic_total: u64,
+    pub ok_count: u64,
+    pub err_count: u64,
+}
+
+#[derive(Template)]
 #[template(path = "logs.html")]
 pub struct LogsTmpl {
     pub title: &'static str,
@@ -49,6 +72,13 @@ pub struct LogsTmpl {
     pub localhost: bool,
     pub authed: bool,
     pub entries: Vec<RouteEntry>,
+    /// true when the ring is capped and routing.jsonl holds older history
+    pub truncated: bool,
+    /// query params echoed back into the filter form
+    pub q_src: String,
+    pub q_dst: String,
+    pub q_status: String,
+    pub total: u64,
 }
 
 #[derive(Template)]
@@ -138,8 +168,135 @@ pub async fn logs_page(State(app): State<AppState>) -> Response {
         localhost: is_localhost(),
         authed: app.admin_set().await,
         entries: app.recent_log(200).await,
+        truncated: app.log_ring.read().await.len() >= crate::state::RING_CAP,
+        q_src: String::new(),
+        q_dst: String::new(),
+        q_status: String::new(),
+        total: app.log_ring.read().await.len() as u64,
     };
     Html(t.render().unwrap_or_default()).into_response()
+}
+
+/// GET /logs?src=&dst=&status=&n= — full audit view over routing.jsonl
+/// (not just the in-memory ring). Filters are substring matches on the
+/// caller/destination names and exact match on HTTP status. `n` caps rows
+/// (default 500, max 5000).
+pub async fn logs_full(State(app): State<AppState>, Query(q): Query<LogsQuery>) -> Response {
+    let entries = read_routing_log(&app.data_dir);
+    let src = q.src.unwrap_or_default();
+    let dst = q.dst.unwrap_or_default();
+    let status = q.status.unwrap_or_default();
+    let n = q.n.unwrap_or(500).clamp(1, 5000);
+    let status_i: Option<u16> = status.parse().ok();
+
+    let mut out: Vec<RouteEntry> = entries
+        .into_iter()
+        .filter(|e| {
+            (src.is_empty() || e.src.contains(&src))
+                && (dst.is_empty() || e.dst.contains(&dst))
+                && status_i.map(|s| e.status == s).unwrap_or(true)
+        })
+        .collect();
+    out.reverse();
+    out.truncate(n);
+    let total = out.len() as u64;
+
+    let t = LogsTmpl {
+        title: "Communication log",
+        active_nav: "logs",
+        localhost: is_localhost(),
+        authed: app.admin_set().await,
+        entries: out,
+        truncated: false,
+        q_src: src,
+        q_dst: dst,
+        q_status: status,
+        total,
+    };
+    Html(t.render().unwrap_or_default()).into_response()
+}
+
+/// GET /peers/{name} — detail page: agent card (capabilities/skills),
+/// registration/liveness metadata, and per-peer traffic history.
+pub async fn peer_detail(State(app): State<AppState>, Path(name): Path<String>) -> Response {
+    let peer = {
+        let inner = app.inner.read().await;
+        inner.peers.iter().find(|p| p.name == name).cloned()
+    };
+    let Some(peer) = peer else {
+        return (axum::http::StatusCode::NOT_FOUND, "unknown peer").into_response();
+    };
+    let registered_at = crate::state::fmt_dt(peer.registered_at);
+    let last_seen = peer.last_seen.map(crate::state::fmt_dt).unwrap_or_default();
+
+    let (capabilities, skills) = match &peer.card {
+        serde_json::Value::Object(m) => (
+            serde_json::to_string_pretty(&m.get("capabilities")).unwrap_or_else(|_| "null".into()),
+            serde_json::to_string_pretty(&m.get("skills")).unwrap_or_else(|_| "null".into()),
+        ),
+        _ => ("null".into(), "null".into()),
+    };
+    let card_pretty = serde_json::to_string_pretty(&peer.card).unwrap_or_else(|_| "{}".into());
+
+    // per-peer traffic from routing.jsonl (peer appears as src or dst)
+    let all = read_routing_log(&app.data_dir);
+    let traffic: Vec<RouteEntry> = all
+        .iter()
+        .filter(|e| e.src == name || e.dst == name)
+        .rev()
+        .take(100)
+        .cloned()
+        .collect();
+    let (ok_count, err_count) =
+        all.iter()
+            .filter(|e| e.src == name || e.dst == name)
+            .fold((0u64, 0u64), |(ok, err), e| {
+                if e.status < 400 {
+                    (ok + 1, err)
+                } else {
+                    (ok, err + 1)
+                }
+            });
+    let traffic_total = ok_count + err_count;
+
+    let t = PeerDetailTmpl {
+        title: format!("Peer · {name}"),
+        active_nav: "peers",
+        localhost: is_localhost(),
+        authed: app.admin_set().await,
+        peer,
+        channel: app.channels.has(&name),
+        registered_at,
+        last_seen,
+        capabilities,
+        skills,
+        card_pretty,
+        traffic,
+        traffic_total,
+        ok_count,
+        err_count,
+    };
+    Html(t.render().unwrap_or_default()).into_response()
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct LogsQuery {
+    pub src: Option<String>,
+    pub dst: Option<String>,
+    pub status: Option<String>,
+    pub n: Option<usize>,
+}
+
+/// Read the persistent routing log (routing.jsonl) — the full audit trail,
+/// not just the in-memory ring. Missing/corrupt tail lines are skipped.
+pub fn read_routing_log(data_dir: &std::path::Path) -> Vec<RouteEntry> {
+    let path = data_dir.join("routing.jsonl");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .filter_map(|l| serde_json::from_str::<RouteEntry>(l).ok())
+        .collect()
 }
 
 pub async fn settings_page(

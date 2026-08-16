@@ -246,6 +246,7 @@ pub struct ChannelQuery {
 pub async fn channel_open(
     State(app): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<ChannelQuery>,
+    crate::auth::ClientIp(ip): crate::auth::ClientIp,
     headers: HeaderMap,
 ) -> axum::response::Response {
     let Some(token) = crate::auth::extract_token(&headers) else {
@@ -269,6 +270,14 @@ pub async fn channel_open(
 
     let (rx, tx, secret) = app.channels.bind(&name);
     tracing::info!("channel open: {name}");
+    // A live reverse channel is peer-initiated traffic — record the peer's
+    // real source IP (the address the SSE connection came from).
+    {
+        let mut inner = app.inner.write().await;
+        if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
+            p.last_ip = Some(ip.clone());
+        }
+    }
     let stream = async_stream::stream! {
         yield Ok::<Event, Infallible>(Event::default().event("hello").data(secret.clone()));
         let mut rx = rx;

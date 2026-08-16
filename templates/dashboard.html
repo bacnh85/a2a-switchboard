@@ -20,7 +20,7 @@
     <p class="muted">Every routed request, live.</p>
     <ul id="flowlog" class="flowlog" aria-live="polite">
       {% for e in recent %}
-      <li><span class="flow-time">{{e.ts}}</span><span class="flow-src">{{e.src}}</span><span class="flow-arrow">→</span><span class="flow-dst">{{e.dst}}</span><span class="flow-method">{{e.method}}</span><span class="flow-status {% if e.status >= 400 %}bad{% else %}ok{% endif %}">{{e.status}}</span><span class="flow-ms">{{e.latency_ms}}ms</span></li>
+      <li><span class="flow-time">{{e.ts_dt()}}</span><span class="flow-src">{{e.src}}</span><span class="flow-arrow">→</span><span class="flow-dst">{{e.dst}}</span><span class="flow-method">{{e.method}}</span><span class="flow-status {% if e.status >= 400 %}bad{% else %}ok{% endif %}">{{e.status}}</span><span class="flow-ms">{{e.latency_ms}}ms</span></li>
       {% endfor %}
     </ul>
   </section>

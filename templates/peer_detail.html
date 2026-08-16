@@ -1,0 +1,68 @@
+{% extends "layout.html" %}
+{% block content %}
+<p><a href="/peers">← back to peers</a></p>
+<h1>{{peer.name}}</h1>
+
+<div class="stats">
+  <div class="stat"><span class="stat-num">{{peer.state_str()}}</span><span class="stat-label">state</span></div>
+  <div class="stat"><span class="stat-num">{% if peer.healthy == Some(true) %}✓{% else %}✗{% endif %}</span><span class="stat-label">health</span></div>
+  <div class="stat"><span class="stat-num">{{traffic_total}}</span><span class="stat-label">routed ({{ok_count}} ok / {{err_count}} err)</span></div>
+</div>
+
+<section class="card">
+  <h2>Identity</h2>
+  <table class="kv">
+    <tr><th>name</th><td class="mono">{{peer.name}}</td></tr>
+    <tr><th>endpoint</th><td class="mono">{{peer.url}}</td></tr>
+    <tr><th>state</th><td>{{peer.state_str()}}</td></tr>
+    <tr><th>source</th><td>{% if peer.auto_accepted %}bootstrap{% else %}manual{% endif %}</td></tr>
+    <tr><th>registered</th><td>{{registered_at}}</td></tr>
+    <tr><th>registered from IP</th><td class="mono">{{peer.reg_ip_str()}}</td></tr>
+    <tr><th>last seen</th><td>{{last_seen}}{% if peer.last_seen.is_some() %} ({{peer.last_seen_dt()}}){% endif %}</td></tr>
+    <tr><th>last IP</th><td class="mono">{{peer.last_ip_str()}}</td></tr>
+    <tr><th>last error</th><td class="mono">{% if let Some(e) = peer.last_error %}{{e}}{% else %}—{% endif %}</td></tr>
+    <tr><th>reverse channel</th><td>{% if channel %}<span class="ok">active</span>{% else %}<span class="bad">no</span>{% endif %}</td></tr>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Agent card — capabilities</h2>
+  {% if capabilities == "null" %}
+  <p class="muted">Peer registered without a card (or without capabilities).</p>
+  {% else %}
+  <pre class="json">{{capabilities}}</pre>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Agent card — skills</h2>
+  {% if skills == "null" %}
+  <p class="muted">Peer registered without a card (or without skills).</p>
+  {% else %}
+  <pre class="json">{{skills}}</pre>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Raw agent card</h2>
+  <details>
+    <summary>toggle raw card JSON</summary>
+    <pre class="json">{{card_pretty}}</pre>
+  </details>
+</section>
+
+<section class="card">
+  <h2>Recent traffic</h2>
+  <p class="muted">Last {{traffic.len()}} routed requests involving this peer (full history: <a href="/logs?src={{peer.name}}">filtered log</a>).</p>
+  <table class="tbl">
+    <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>
+    <tbody>
+    {% for e in traffic %}
+    <tr><td>{{e.ts_dt()}}</td><td>{{e.src}}</td><td>{{e.dst}}</td><td>{{e.method}}</td><td>{{e.status}}</td><td>{{e.bytes}}</td><td>{{e.latency_ms}}</td></tr>
+    {% endfor %}
+    {% if traffic.is_empty() %}<tr><td colspan="7" class="empty">No routed traffic yet.</td></tr>{% endif %}
+    </tbody>
+  </table>
+</section>
+
+{% endblock %}

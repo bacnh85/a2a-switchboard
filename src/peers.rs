@@ -136,7 +136,9 @@ pub async fn register(
         upstream_token: reg.upstream_token,
         caller_token: Some(gen_token()),
         registered_at: now(),
-        last_seen: None,
+        last_seen: Some(now()),
+        last_ip: None,
+        reg_ip: Some(client_ip),
         healthy: None,
         last_error: None,
         auto_accepted: kind == TokenKind::Bootstrap,
@@ -489,10 +491,11 @@ pub async fn proxy(
                 }
             }
             let bytes = upstream.bytes().await.unwrap_or_default();
-            // Mark healthy + last_seen on any successful exchange.
+            // Mark healthy + last_seen + last_ip on any successful exchange.
             let mut inner = app.inner.write().await;
             if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
                 p.last_seen = Some(now());
+                p.last_ip = Some(client_ip.clone());
                 if p.healthy != Some(true) {
                     p.healthy = Some(true);
                     p.last_error = None;
