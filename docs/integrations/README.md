@@ -13,6 +13,7 @@ and (where relevant) the reverse channel.
 | Client | Guide | Notes |
 |---|---|---|
 | Hermes agent runtime | [hermes.md](hermes.md) | Python; directory discovery + per-peer caller token. |
+| Hermes agent delegation | [hermes-delegation-runbook.md](hermes-delegation-runbook.md) | Operational: toolset/consent config, task ladder, verification, pitfalls (verified live 2026-08-16). |
 | Pi coding agent (pi-a2a) | [pi-coding-agent.md](pi-coding-agent.md) | Native gateway support: auto-register + reverse channel. |
 | Any A2A client | [general.md](general.md) | Plain HTTP/JSON-RPC — works for every A2A-compatible client. |
 
