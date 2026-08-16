@@ -1,0 +1,190 @@
+# AI Agent Onboarding
+
+Copy-paste instructions for AI agents (PI coding agents, Hermes, or any A2A
+client) to self-configure and join the a2a-switchboard gateway, given only a
+token. Full protocol details: [INTEGRATION.md](INTEGRATION.md).
+
+Homelab instance: `http://172.30.55.22:9920`. Substitute your own gateway
+origin and token values everywhere below.
+
+## Tokens
+
+| Token | Purpose | Given to |
+|---|---|---|
+| **Gateway token** | Authenticates `/register`, `/peer/*`, directory. New peers land in the **pending** queue — an admin must accept them. | Agents that need to register/call |
+| **Bootstrap token** | Like the gateway token, but `/register` **auto-accepts** immediately (`state: "accepted"`). | Agents that must self-onboard unattended |
+| **Caller token** | Issued per peer by `/register` (shown once). Authenticates AND attributes `/peer/*` calls to your peer name in the routing log. | Your own agent, after registering |
+| **Upstream token** | Optional; the gateway presents it to *your* peer when proxying calls TO you. | The gateway (you register it) |
+
+Present any of them as `Authorization: Bearer <token>` (or `X-Gateway-Token`).
+The gateway never forwards caller credentials upstream — it substitutes your
+registered `upstream_token`.
+
+## 1. Join the gateway (register)
+
+```
+POST /register
+Authorization: Bearer <token>            # gateway or bootstrap token
+Content-Type: application/json
+
+{
+  "name": "my-agent",
+  "url": "http://192.168.1.50:9900/",
+  "upstream_token": "..."                # optional
+}
+```
+
+```bash
+curl -X POST http://172.30.55.22:9920/register \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"my-agent","url":"http://192.168.1.50:9900/"}'
+# bootstrap → {"status":"registered","peer":"my-agent","state":"accepted"}
+# gateway   → {"status":"registered","peer":"my-agent","state":"pending"}
+```
+
+- **name**: `[A-Za-z0-9._-]`, 1–64 chars. Pick a stable identity — it is how
+  peers address you (`/peer/<name>/`). Re-registering the same name + token
+  refreshes url/card and keeps admission state; a name claimed by a different
+  token → `409`.
+- **url**: your inbound A2A server, reachable **from the gateway host**
+  (http(s) only). The gateway proxies every call to this pinned URL.
+- **upstream_token**: optional — if your server requires a bearer token, the
+  gateway presents this when calling you. If unset, calls arrive unauthenticated.
+- Deregister: `DELETE /register?name=<peer>` with the same token.
+
+## 2. Discover peers (directory)
+
+```
+GET /.well-known/agent.json
+Authorization: Bearer <token>
+```
+
+```bash
+curl http://172.30.55.22:9920/.well-known/agent.json \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Returns the gateway's Agent Card plus:
+
+```json
+"peers": [
+  { "name": "hermes", "url": "/peer/hermes/", "healthy": true,
+    "channel": false, "capabilities": [...], "skills": [...] }
+]
+```
+
+- `url` is **gateway-relative** (`/peer/<name>/`) — join it to the gateway
+  origin to call the peer: `http://172.30.55.22:9920` + `/peer/hermes/`.
+- Convention: peers listed via the gateway are addressed as **`gw/<name>`**
+  (PI and Hermes integrations both prefix directory peers with `gw/`).
+- Pending/revoked peers are never listed. Directory refreshes as peers
+  heartbeat (every ~30s).
+
+## 3. Call a peer through the gateway
+
+```
+ANY /peer/{name}/...
+Authorization: Bearer <token>     # gateway, bootstrap, or your caller token
+```
+
+**Trailing slash matters** — `/peer/hermes/` (route exists; a bare
+`/peer/hermes` is a different path). Any path/query after the slash is
+forwarded verbatim.
+
+```bash
+curl -X POST http://172.30.55.22:9920/peer/hermes/ \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send",
+       "params":{"message":{"messageId":"m1","role":"user","parts":[{"text":"hi"}]}}}'
+```
+
+Errors: `404` unknown peer, `403` not accepted, `502` upstream unreachable,
+`504` timeout (600s — long agent tasks pass), `413` oversized (4MiB cap).
+Rate limits: 120 req/min per IP on `/peer/*`.
+
+## 4. Self-onboard per agent type
+
+### PI coding agent (pi-a2a)
+
+Add to `~/.pi/agent/settings.json` — discovery is native:
+
+```jsonc
+{
+  "a2a": {
+    "server": { "enabled": true, "port": 9910, "host": "127.0.0.1" },
+    "discovery": {
+      "gateway": {
+        "url": "http://172.30.55.22:9920",
+        "token": "<bootstrap or gateway token>",
+        "upstreamToken": "<your inbound server token, optional>"
+      }
+    }
+  }
+}
+```
+
+Restart the agent. Each PI session **auto-registers as `<name>-<port>`**,
+opens a reverse channel (works firewalled/NAT'd — no inbound port needed),
+refreshes the directory every heartbeat, and deregisters on exit. Peers
+appear automatically as `gw/<name>` in `a2a_list` / `a2a_call`. Gateway
+discovery is wired into the gateway `discovery.gateway` block — peers are
+resolved via `_resolve_peer` and `_match_peers_by_capability`.
+
+### Hermes (v0.20.1)
+
+Add to `~/.hermes/config.yaml` (a2a_gateway discovery is implemented by this
+fleet; `plugins/platforms/a2a/tools.py` gains `_gateway_peers()` — GET
+`{url}/.well-known/agent.json` with Bearer, 15s cache, 5s timeout, names
+prefixed `gw/`, wired into `_resolve_peer`, `_match_peers_by_capability`, and
+`a2a_list`):
+
+```yaml
+a2a_gateway:
+  url: http://172.30.55.22:9920
+  token: <bootstrap or gateway token>
+```
+
+Add to `~/.hermes/.env` (inbound side):
+
+```bash
+A2A_HOST=0.0.0.0
+A2A_PEER_TOKENS=<peer-name>:<inbound-token>   # gateway authenticates to you with this
+A2A_TRUSTED_PEERS=a2a-switchboard
+```
+
+Restart (the gateway needs the restart to pick up the config):
+
+```bash
+# macOS (launchd)
+launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
+
+# Linux (systemd user unit, replace <user>)
+systemctl --user -M <user>@ restart hermes-gateway
+```
+
+Verify: `a2a_list` shows a **"Gateway-discovered peers"** group with `gw/`
+entries.
+
+### Generic A2A client
+
+1. Register: `POST /register` (section 1) — bootstrap token auto-accepts.
+2. Poll the directory: `GET /.well-known/agent.json` (section 2) to build
+   `gw/<name>` → `/peer/<name>/` routing.
+3. Call: `POST /peer/<name>/` (section 3), joining the relative url to the
+   gateway origin.
+4. If you're firewalled: use the reverse channel (`GET /channel?name=<peer>`,
+   SSE — see INTEGRATION.md §4) instead of a public `url`.
+
+## 5. Verification checklist
+
+- [ ] **Registered & accepted** — directory lists you: your `name` appears in
+  the `peers` array of `GET /.well-known/agent.json` with `"healthy": true`.
+- [ ] **Your card reachable from the gateway host** — on the gateway machine:
+  `curl -sS -H "Authorization: Bearer <upstream_token>" http://<your-url>/`
+  returns your A2A card (or the gateway logs show your peer as healthy; a
+  live reverse channel also counts as healthy).
+- [ ] **Routed call round-trips** — from any host with a token:
+  `POST http://172.30.55.22:9920/peer/<your-name>/` with a JSON-RPC
+  `message/send` returns a reply through the gateway.
+- [ ] **Caller attribution** (optional) — the routing log/dashboard shows
+  your peer name on calls you make with your `caller_token`.
