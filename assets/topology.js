@@ -184,24 +184,59 @@
   function logRow(e) {
     if (!log) return;
     var li = document.createElement('li');
-    li.innerHTML =
+    li.className = 'flow-row';
+    li.dataset.http = e.method;
+    if (e.rpc_method) li.dataset.method = e.rpc_method;
+    if (e.rpc_id) li.dataset.rpcId = e.rpc_id;
+    if (e.preview) li.dataset.preview = e.preview;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'flow-line';
+    btn.setAttribute('aria-expanded', 'false');
+    btn.innerHTML =
       '<span class="flow-time">' + fmtTime(e.ts) + '</span>' +
       '<span class="flow-src">' + esc(e.src) + '</span>' +
       '<span class="flow-arrow">→</span>' +
       '<span class="flow-dst">' + esc(e.dst) + '</span>' +
-      '<span class="flow-method">' + esc(e.method) + '</span>' +
+      '<span class="flow-method">' + esc(e.rpc_method || e.method) + '</span>' +
       '<span class="flow-status ' + (e.status >= 400 ? 'bad' : 'ok') + '">' + e.status + '</span>' +
       '<span class="flow-ms">' + e.latency_ms + 'ms</span>';
+    var det = document.createElement('div');
+    det.className = 'flow-detail';
+    det.hidden = true;
+    li.appendChild(btn);
+    li.appendChild(det);
     log.prepend(li);
     while (log.children.length > 100) log.lastChild.remove();
+  }
+
+  // click-to-expand audited detail on any flow row (live + server-rendered)
+  if (log) {
+    log.addEventListener('click', function (ev) {
+      var btn = ev.target.closest('.flow-line');
+      if (!btn) return;
+      var li = btn.parentElement;
+      var det = li.querySelector('.flow-detail');
+      if (!det) return;
+      if (!det.textContent) {
+        var lines = ['RPC: ' + (li.dataset.method || '') + ' (HTTP ' + (li.dataset.http || '') + ')'];
+        if (li.dataset.rpcId) lines.push('id: ' + li.dataset.rpcId);
+        lines.push('request preview: ' + (li.dataset.preview || '—'));
+        det.textContent = lines.join('\n');
+      }
+      det.hidden = !det.hidden;
+      btn.setAttribute('aria-expanded', det.hidden ? 'false' : 'true');
+    });
   }
 
   function onRoute(e) {
     var m = JSON.parse(e.data);
     if (!m || !m.dst) return;
     var ok = m.status < 400;
-    // live ring counter: every routed request bumps the dashboard stat
+    // live ring counter + error/latency stats (covers server render gap)
     bumpRouted();
+    if (ok) { /* errors unchanged */ } else bumpErrors();
+    updateAvg(m.latency_ms);
     // attribution: strip channel-/client- prefixes when they match a known peer
     var srcName = normalizeCaller(m.src);
     var knownSrc = state.peers.some(function (p) { return p.name === srcName; });
@@ -234,13 +269,28 @@
     return '';
   }
 
-  // --- live "routed (ring)" stat ---
+  // --- live dashboard stats ---
+  function statNum(id) { return document.getElementById(id); }
   function bumpRouted() {
-    var el = document.getElementById('stat-routed');
+    var el = statNum('stat-routed');
     if (el) el.textContent = String((parseInt(el.textContent, 10) || 0) + 1);
   }
+  function bumpErrors() {
+    var el = statNum('stat-errors');
+    if (el) el.textContent = String((parseInt(el.textContent, 10) || 0) + 1);
+    var card = el && el.closest('.stat');
+    if (card && parseInt(el.textContent, 10) > 0) card.classList.add('stat-bad');
+  }
+  // lazy incremental mean over the live session (ring average shown at load)
+  var liveN = 0, liveSum = 0;
+  function updateAvg(ms) {
+    liveN++; liveSum += ms;
+    var el = statNum('stat-avg-ms');
+    // ponytail: session-average blend; re-baseline from the ring on reload
+    if (el) el.firstChild.textContent = Math.round(liveSum / liveN);
+  }
   function setRouted(n) {
-    var el = document.getElementById('stat-routed');
+    var el = statNum('stat-routed');
     if (el) el.textContent = String(n);
   }
 
@@ -279,7 +329,6 @@
         if (!isNaN(ts) && ts > 1000000000) t.textContent = fmtTime(ts);
       });
     }
-
     // live routing events
     var es = new EventSource('/api/events');
     es.addEventListener('route', onRoute);

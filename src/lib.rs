@@ -45,6 +45,7 @@ pub fn router(app: Arc<App>) -> axum::Router {
         .route("/peers/{name}", get(admin::peer_detail))
         .route("/logs", get(admin::logs_page).post(admin::logs_full))
         .route("/logs/full", get(admin::logs_full))
+        .route("/logs/export", get(admin::logs_export))
         .route("/settings", get(admin::settings_page))
         .route("/settings/password", post(admin::set_password))
         .route("/peers/{name}/accept", post(admin::accept_peer))

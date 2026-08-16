@@ -53,12 +53,12 @@
 
 <section class="card">
   <h2>Recent traffic</h2>
-  <p class="muted">Last {{traffic.len()}} routed requests involving this peer (full history: <a href="/logs?src={{peer.name}}">filtered log</a>).</p>
-  <table class="tbl">
+    <p class="muted">Last {{traffic.len()}} routed requests involving this peer (full history: <a href="/logs/full?src={{peer.name}}">filtered log</a>, or filter by destination there).</p>
+    <table class="tbl">
     <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>
     <tbody>
     {% for e in traffic %}
-    <tr><td>{{e.ts_dt()}}</td><td>{{e.src}}</td><td>{{e.dst}}</td><td>{{e.method}}</td><td>{{e.status}}</td><td>{{e.bytes}}</td><td>{{e.latency_ms}}</td></tr>
+    <tr><td>{{e.ts_dt()}}</td><td>{{e.src}}</td><td>{{e.dst}}</td><td class="mono" title="HTTP {{e.method}}">{{e.method_display()}}</td><td><span class="{% if e.status >= 400 %}bad{% else %}ok{% endif %}">{{e.status}}</span></td><td>{{e.bytes}}</td><td>{{e.latency_ms}}</td></tr>
     {% endfor %}
     {% if traffic.is_empty() %}<tr><td colspan="7" class="empty">No routed traffic yet.</td></tr>{% endif %}
     </tbody>

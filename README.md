@@ -35,11 +35,17 @@ tokens, a directory, live routing logs, and a live topology view in one binary.
 - **Directory as Agent Card** — `/.well-known/agent.json` (alias
   `agent-card.json`) lists accepted peers, auth-aware.
 - **Admin UI** — sidebar layout, dashboard with **live routing topology**
-  (requests animate as packets caller → gateway → destination, live
-  communication log of every routed request), pending-peer queue, routing log.
+  (requests animate as packets caller → gateway → destination), RED stats
+  (routed / errors / avg latency / pending), live communication log of every
+  routed request, pending-peer queue, routing log.
 - **Caller attribution** — optional `X-Gateway-Caller` header (advisory,
   display-only, stripped before forwarding) so the dashboard shows which peer
   made each call.
+- **Message-level audit trail** — proxied JSON-RPC calls record the RPC method,
+  request id, and a redacted, capped preview of `params` (secret-looking keys
+  replaced with `[redacted]`) to `routing.jsonl`; inspectable in the UI
+  (click-to-expand rows) and exportable as JSONL. Redaction is a heuristic,
+  not a security boundary.
 - **Password protection** — optional admin password, set in Settings (initial
   set requires a localhost connection). Auth is off until a password is set;
   then all admin pages/APIs require a 12h session cookie. Peer/token endpoints

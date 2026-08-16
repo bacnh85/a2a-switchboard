@@ -24,7 +24,7 @@
     </a>
   </nav>
   <div class="sidebar-foot">
-    <span class="muted ver">v{{ "0.1.0" }}</span>
+    <span class="muted ver">v{{ env!("CARGO_PKG_VERSION") }}</span>
     {% if authed %}
     <form method="post" action="/logout"><button class="btn btn-ghost">Sign out</button></form>
     {% endif %}

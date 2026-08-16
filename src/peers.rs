@@ -419,6 +419,7 @@ pub async fn proxy(
     .await;
     let started = std::time::Instant::now();
     let method_s = method.to_string();
+    let audit = crate::state::audit_extract(&body);
 
     let mut req = app
         .http
@@ -466,6 +467,9 @@ pub async fn proxy(
         status,
         bytes: body_len as u64,
         latency_ms: started.elapsed().as_millis() as u64,
+        rpc_method: audit.rpc_method,
+        rpc_id: audit.rpc_id,
+        preview: audit.preview,
     })
     .await;
 
@@ -582,6 +586,7 @@ async fn channel_roundtrip(
     .await;
     let started = std::time::Instant::now();
     let method_s = method.to_string();
+    let audit = crate::state::audit_extract(&body);
     let status;
     let out = if let Some(rx) = app.channels.deliver(&name, head) {
         match tokio::time::timeout(PROXY_TIMEOUT, rx).await {
@@ -610,6 +615,9 @@ async fn channel_roundtrip(
         status,
         bytes: body.len() as u64,
         latency_ms: started.elapsed().as_millis() as u64,
+        rpc_method: audit.rpc_method,
+        rpc_id: audit.rpc_id,
+        preview: audit.preview,
     })
     .await;
     out

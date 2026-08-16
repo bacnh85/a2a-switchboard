@@ -2,7 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.4.0] - 2026-08-16
+
+### Added
+
+- **Message-level audit trail**: every proxied JSON-RPC call now records the
+  RPC method, request id, and a redacted 2KB-capped preview of `params` in
+  `routing.jsonl` (secret-looking keys auto-redacted; non-JSON bodies capture
+  nothing). Click a dashboard/log row to inspect. Based on RED-method / Grafana
+  operator-console patterns.
+- **Dashboard RED stats**: routed (ring), errors, avg latency, pending — all
+  clickable (directed browsing), live-updating from SSE.
+- **Logs**: method filter (JSON-RPC or HTTP), errors-only filter, JSONL export
+  (`/logs/export`) honoring the same filters.
+
+### Fixed
+
+- Logs page filter form targeted `/logs` (live ring view) so query-string
+  filters never applied; now targets `/logs/full`.
 
 ## [0.3.0] - 2026-08-16
 
@@ -86,8 +103,6 @@ All notable changes to this project are documented in this file.
 - No-password warning banner on non-localhost binds no longer consumes the
   whole page: moved inside the content area, shown only when no admin
   password is set, with a direct "Set a password" link to Settings.
-
-## [Unreleased]
 
 ## [0.1.1] - 2026-08-15
 

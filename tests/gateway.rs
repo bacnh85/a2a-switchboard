@@ -381,7 +381,12 @@ async fn channel_roundtrip_full() {
     let boot2 = boot.clone();
     let call = tokio::spawn(async move {
         router2
-            .oneshot(req("POST", "/peer/fw", Some(&boot2), Some(r#"{"ping":1}"#)))
+            .oneshot(req(
+                "POST",
+                "/peer/fw",
+                Some(&boot2),
+                Some(r#"{"jsonrpc":"2.0","id":"ch1","method":"message/send","params":{"x-api-key":"sk-chan","note":"hi"}}"#),
+            ))
             .await
             .unwrap()
     });
@@ -405,7 +410,7 @@ async fn channel_roundtrip_full() {
     let secret = env["chan_secret"].as_str().unwrap().to_string();
     assert_eq!(env["method"], "POST");
     let body_in = decode(env["body_b64"].as_str().unwrap());
-    assert_eq!(body_in, r#"{"ping":1}"#);
+    assert!(body_in.contains("message/send"));
 
     // Peer posts the response — echoing the per-channel secret.
     let resp_json = serde_json::json!({
@@ -433,11 +438,20 @@ async fn channel_roundtrip_full() {
     let b = axum::body::to_bytes(out.into_body(), 65536).await.unwrap();
     assert_eq!(String::from_utf8_lossy(&b), "echo:ok");
 
-    // Routing log records the channel path (anonymous → channel- marker).
+    // Routing log records the channel path (anonymous → channel- marker)
+    // AND the audit fields (same capture contract as the direct path).
     let log = app.recent_log(10).await;
-    assert!(log
+    let e = log
         .iter()
-        .any(|e| e.dst == "fw" && e.src.starts_with("channel-") && e.status == 200));
+        .find(|e| e.dst == "fw" && e.src.starts_with("channel-"))
+        .expect("channel route logged");
+    assert_eq!(e.status, 200);
+    assert_eq!(e.rpc_method.as_deref(), Some("message/send"));
+    assert_eq!(e.rpc_id.as_deref(), Some("ch1"));
+    let preview = e.preview.as_deref().expect("preview on channel path");
+    assert!(preview.contains("[redacted]"), "x-api-key redacted: {preview}");
+    assert!(!preview.contains("sk-chan"));
+    assert!(preview.contains("hi"));
 }
 
 #[tokio::test]
@@ -1258,6 +1272,9 @@ async fn sse_stream_terminates_after_logout() {
                 status: 200,
                 bytes: 0,
                 latency_ms: 0,
+                rpc_method: None,
+                rpc_id: None,
+                preview: None,
             })
             .await;
         if let Some(Ok(chunk)) = stream.next().await {
@@ -1274,4 +1291,200 @@ async fn sse_stream_terminates_after_logout() {
         terminated,
         "SSE stream must terminate after logout (session invalid)"
     );
+}
+
+#[tokio::test]
+async fn audit_preview_captured_and_redacted() {
+    // Proxied JSON-RPC bodies leave an audit trail: rpc method/id captured,
+    // params previewed with secret-ish keys redacted.
+    let fake = axum::Router::new()
+        .route(
+            "/",
+            axum::routing::post(|| async {
+                (axum::http::StatusCode::OK, axum::Json(serde_json::json!({"ok":1})))
+            }),
+        )
+        .route(
+            "/.well-known/agent-card.json",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"name":"fake"})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/fake",
+            Some(&boot),
+            Some(
+                r#"{"jsonrpc":"2.0","id":42,"method":"message/send","params":{"message":{"text":"hello"},"api_key":"sk-live-1234567890"}}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let log = app.recent_log(10).await;
+    assert_eq!(log.len(), 1);
+    let e = &log[0];
+    assert_eq!(e.rpc_method.as_deref(), Some("message/send"));
+    assert_eq!(e.rpc_id.as_deref(), Some("42"));
+    let preview = e.preview.as_deref().expect("preview captured");
+    assert!(
+        preview.contains("[redacted]"),
+        "secret key must be redacted in preview: {preview}"
+    );
+    assert!(
+        !preview.contains("sk-live-1234567890"),
+        "raw secret must never appear in the audit trail: {preview}"
+    );
+    assert!(preview.contains("hello"));
+}
+
+#[tokio::test]
+async fn audit_extract_unit() {
+    // non-JSON bodies capture nothing; unit paths over the extractor itself.
+    use a2a_switchboard::state::audit_extract;
+    let none = audit_extract(b"not json at all");
+    assert!(none.rpc_method.is_none());
+    assert!(none.preview.is_none());
+
+    let deep = audit_extract(
+        br#"{"jsonrpc":"2.0","id":7,"method":"m","params":{"password":"x","list":[1,2]}}"#,
+    );
+    assert_eq!(deep.rpc_method.as_deref(), Some("m"));
+    assert_eq!(deep.rpc_id.as_deref(), Some("7"));
+    assert!(deep.preview.as_deref().unwrap().contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn audit_endpoints_require_admin_session() {
+    // With a password set, /logs/full and /logs/export must redirect to
+    // /login for unauthenticated GETs (audit trail stays private), and
+    // serve normally with a valid session.
+    let (router, app, _gw, _boot) = test_app().await;
+    app.set_admin_password(None, "password123").await.unwrap();
+
+    for uri in ["/logs/full", "/logs/export"] {
+        let r = router
+            .clone()
+            .oneshot(req("GET", uri, None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SEE_OTHER, "{uri} must gate");
+        assert_eq!(r.headers().get("location").unwrap(), "/login");
+    }
+
+    let r = router
+        .clone()
+        .oneshot(form_req("POST", "/login", "password=password123"))
+        .await
+        .unwrap();
+    let cookie = r.headers().get("set-cookie").unwrap().to_str().unwrap();
+    let sid = cookie.split(';').next().unwrap().to_string();
+    let r = router
+        .clone()
+        .oneshot(
+            req("GET", "/logs/export", None, None).with_header("cookie", &sid),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers().get("content-type").unwrap(),
+        "application/x-ndjson"
+    );
+    assert!(r
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("attachment"));
+
+    // authed /logs/full renders the page too
+    let r = router
+        .clone()
+        .oneshot(
+            req("GET", "/logs/full", None, None).with_header("cookie", &sid),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    assert!(String::from_utf8_lossy(&b).contains("Communication log"));
+}
+
+#[tokio::test]
+async fn old_format_routing_log_still_parses() {
+    // Pre-audit-field routing.jsonl lines (no rpc_method/rpc_id/preview)
+    // must still render in /logs/full — serde default regression guard.
+    let (router, app, _gw, _boot) = test_app().await;
+    std::fs::write(
+        app.data_dir.join("routing.jsonl"),
+        "{\"ts\":1786000000,\"src\":\"legacy-a\",\"dst\":\"legacy-b\",\"method\":\"POST\",\"status\":200,\"bytes\":10,\"latency_ms\":5}\n",
+    )
+    .unwrap();
+    let r = router.clone().oneshot(req("GET", "/logs/full", None, None)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let html = String::from_utf8_lossy(&b);
+    assert!(html.contains("legacy-a"), "old-format entry must render");
+    assert!(html.contains("POST"));
+
+    // filter still works over legacy lines
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/logs/full?src=nosuch", None, None))
+        .await
+        .unwrap();
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    assert!(String::from_utf8_lossy(&b).contains("No matching entries"));
+}
+
+#[tokio::test]
+async fn audit_extract_bounds() {
+    // rpc_id capped at 64 chars; oversized params truncated to ~2KB;
+    // hyphenated secret keys redacted (x-api-key, api-key variants).
+    use a2a_switchboard::state::audit_extract;
+
+    let long_id = "i".repeat(10_000);
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":"{long_id}","method":"m","params":{{}}}}"#
+    );
+    let a = audit_extract(body.as_bytes());
+    assert!(a.rpc_id.as_deref().unwrap().len() <= 64);
+
+    let big = "x".repeat(50_000);
+    let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"m","params":{{"blob":"{big}"}}}}"#);
+    let a = audit_extract(body.as_bytes());
+    assert_eq!(a.rpc_id.as_deref(), Some("1"));
+    assert!(a.preview.as_deref().unwrap().len() <= 2048 + 10);
+
+    // numeric ids stay numeric text; string ids keep interior quotes intact
+    let a = audit_extract(br#"{"id":42}"#);
+    assert_eq!(a.rpc_id.as_deref(), Some("42"));
+    let a = audit_extract(br#"{"id":"a\"b"}"#);
+    assert_eq!(a.rpc_id.as_deref(), Some("a\"b"));
+
+    let body = r#"{"method":"m","params":{"x-api-key":"sk-1","api-key":"sk-2","Authorization":"Bearer z","normal":"v"}}"#;
+    let a = audit_extract(body.as_bytes());
+    let p = a.preview.as_deref().unwrap();
+    assert!(p.contains("[redacted]"));
+    assert!(!p.contains("sk-1") && !p.contains("sk-2") && !p.contains("Bearer z"));
+    assert!(p.contains("v"));
 }

@@ -224,13 +224,38 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; 
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: var(--fs-sm);
 }
-.flowlog li {
+.flowlog li.flow-row {
+  display: block;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+.flow-line {
   display: flex;
   align-items: baseline;
   gap: var(--s-1);
+  width: 100%;
   padding: 4px var(--s-1);
-  border-bottom: 1px solid var(--border);
+  font: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
 }
+.flow-line:hover { background: var(--surface-2); }
+.flow-line:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.flow-detail {
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  margin: 4px var(--s-1) var(--s-1);
+  padding: var(--s-1);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.flow-detail[hidden] { display: none; }
 .flow-time { color: var(--text-3); flex-shrink: 0; }
 .flow-src { font-weight: 600; }
 .flow-arrow { color: var(--text-3); }
@@ -238,6 +263,25 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; 
 .flow-method { color: var(--text-2); text-transform: uppercase; font-size: var(--fs-xs); }
 .flow-status { flex-shrink: 0; margin-left: auto; font-weight: 600; }
 .flow-ms { color: var(--text-2); flex-shrink: 0; }
+
+/* filter-bar checkbox + expandable log rows */
+.chk { display: flex; align-items: center; gap: 4px; font-size: var(--fs-sm); color: var(--text-2); }
+.chk input { accent-color: var(--accent); }
+.chk input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.log-row { cursor: pointer; }
+.log-row:hover { background: var(--surface-2); }
+.log-row:focus-visible, .log-row.expanded { outline: none; background: var(--surface-2); }
+.log-row-err > td:first-child { border-left: 3px solid var(--bad); }
+.log-detail > td {
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: var(--s-1) var(--s-2);
+}
+.log-detail[hidden] { display: none; }
 
 
 .dot-ok { fill: var(--ok); }
@@ -270,7 +314,18 @@ h2 { font-size: var(--fs-xl); margin: var(--s-4) 0 var(--s-2); }
   gap: 4px;
 }
 .stat-num { font-size: var(--fs-2xl); font-weight: 700; }
+.stat-unit { font-size: var(--fs-base); font-weight: 500; color: var(--text-2); margin-left: 2px; }
 .stat-label { color: var(--text-3); font-size: var(--fs-sm); }
+.stat-sub { color: var(--text-3); font-size: var(--fs-xs); }
+/* stats are now links (directed browsing: every KPI drills down) */
+a.stat { text-decoration: none; color: var(--text); }
+a.stat:hover { background: var(--surface-2); }
+a.stat:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* RED variants: severity via left border + tint, not new colors */
+a.stat.stat-warn { border-left: 4px solid var(--warn); }
+a.stat.stat-bad { border-left: 4px solid var(--bad); }
+a.stat:hover.stat-warn { background: var(--warn-bg); }
+a.stat:hover.stat-bad { background: var(--bad-bg); }
 
 .tbl {
   width: 100%;

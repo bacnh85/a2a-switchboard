@@ -2,28 +2,70 @@
 {% block content %}
 <h1>Communication log</h1>
 
-<form method="get" action="/logs" class="filter-bar">
+<form method="get" action="/logs/full" class="filter-bar">
   <input type="text" name="src" placeholder="caller contains…" value="{{q_src}}" aria-label="filter by source">
   <input type="text" name="dst" placeholder="destination contains…" value="{{q_dst}}" aria-label="filter by destination">
+  <input type="text" name="method" placeholder="method (e.g. message/send)" value="{{q_method}}" aria-label="filter by rpc or http method">
   <input type="text" name="status" placeholder="status (e.g. 200)" value="{{q_status}}" aria-label="filter by status">
+  <label class="chk"><input type="checkbox" name="errors" value="1" {% if errors_only %}checked{% endif %}> errors only</label>
   <button class="btn btn-primary" type="submit">Filter</button>
-  <a class="btn" href="/logs">Clear</a>
-  <span class="muted filter-note">{{total}} matching entries{% if truncated %} (ring capped at 1000 — older history in <code>data/routing.jsonl</code>){% endif %}</span>
+  <a class="btn" href="/logs/full">Clear</a>
+  <a class="btn" href="/logs/export?src={{q_src|urlencode}}&dst={{q_dst|urlencode}}&method={{q_method|urlencode}}&status={{q_status|urlencode}}{% if errors_only %}&errors=1{% endif %}&n=5000">Export JSONL</a>
 </form>
 
 <table class="tbl">
   <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>
   <tbody>
   {% for e in entries %}
-  <tr><td>{{e.ts_dt()}}</td><td>{{e.src}}</td><td>{{e.dst}}</td><td>{{e.method}}</td><td>{{e.status}}</td><td>{{e.bytes}}</td><td>{{e.latency_ms}}</td></tr>
+  <tr class="log-row{% if e.status >= 400 %} log-row-err{% endif %}" tabindex="0" aria-expanded="false"{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %} data-method="{{e.method_display()}}" data-http="{{e.method}}" data-rpc-id="{% if let Some(id) = e.rpc_id %}{{id}}{% endif %}">
+    <td>{{e.ts_dt()}}</td>
+    <td>{{e.src}}</td>
+    <td>{{e.dst}}</td>
+    <td class="mono" title="HTTP {{e.method}}">{{e.method_display()}}</td>
+    <td><span class="{% if e.status >= 400 %}bad{% else %}ok{% endif %}">{{e.status}}</span></td>
+    <td>{{e.bytes}}</td>
+    <td>{{e.latency_ms}}</td>
+  </tr>
+  <tr class="log-detail" hidden><td colspan="7"></td></tr>
   {% endfor %}
   {% if entries.is_empty() %}<tr><td colspan="7" class="empty">No matching entries.</td></tr>{% endif %}
   </tbody>
 </table>
-
-{% if !q_src.is_empty() || !q_dst.is_empty() || !q_status.is_empty() %}
-<p class="muted">Showing filtered history from <code>data/routing.jsonl</code>. <a href="/logs">Clear filters</a> to see the live ring.</p>
+<script>
+(function () {
+  var tbl = document.querySelector('.tbl');
+  if (!tbl) return;
+  tbl.addEventListener('click', function (ev) {
+    var row = ev.target.closest('.log-row');
+    if (!row) return;
+    toggleRow(row);
+  });
+  tbl.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    var row = ev.target.closest('.log-row');
+    if (!row) return;
+    ev.preventDefault();
+    toggleRow(row);
+  });
+  function toggleRow(row) {
+    var detail = row.nextElementSibling;
+    if (!detail || !detail.classList.contains('log-detail')) return;
+    var cell = detail.firstElementChild;
+    if (!cell.textContent) {
+      var lines = ['RPC: ' + (row.dataset.method || '') + ' (HTTP ' + (row.dataset.http || '') + ')'];
+      if (row.dataset.rpcId) lines.push('id: ' + row.dataset.rpcId);
+      lines.push('request preview: ' + (row.dataset.preview || '—'));
+      cell.textContent = lines.join('\n');
+    }
+    detail.hidden = !detail.hidden;
+    row.setAttribute('aria-expanded', String(!detail.hidden));
+    row.classList.toggle('expanded', !detail.hidden);
+  }
+})();
+</script>
+{% if !q_src.is_empty() || !q_dst.is_empty() || !q_method.is_empty() || !q_status.is_empty() || errors_only %}
+<p class="muted">Showing {{total}} matching entries from <code>data/routing.jsonl</code>. <a href="/logs/full">Clear filters</a> to see the latest 500.</p>
 {% else %}
-<p class="muted">Last {{entries.len()}} entries (in-memory ring). Full history: <code>data/routing.jsonl</code> — use the filters above to page through it.</p>
+<p class="muted">{{total}} entries (newest first). Live in-memory ring caps at 1000 — full history in <code>data/routing.jsonl</code>; filter or <a href="/logs/export?n=5000">export</a> to page through it.</p>
 {% endif %}
 {% endblock %}

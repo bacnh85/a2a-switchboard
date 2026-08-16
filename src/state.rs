@@ -109,12 +109,121 @@ pub struct RouteEntry {
     pub status: u16,
     pub bytes: u64,
     pub latency_ms: u64,
+    /// JSON-RPC method from the request body (audit; None for non-RPC calls).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_method: Option<String>,
+    /// JSON-RPC request id (audit correlation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_id: Option<String>,
+    /// Redacted, capped preview of the request params (audit trail).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 impl RouteEntry {
     /// Askama-friendly formatted timestamp (local date-time).
     pub fn ts_dt(&self) -> String {
         fmt_dt(self.ts)
+    }
+    /// Method shown in the UI: JSON-RPC method when captured, else HTTP method.
+    pub fn method_display(&self) -> &str {
+        self.rpc_method.as_deref().unwrap_or(&self.method)
+    }
+}
+
+/// Request-side audit info extracted from a (potential) JSON-RPC body.
+#[derive(Debug, Default, Clone)]
+pub struct AuditInfo {
+    pub rpc_method: Option<String>,
+    pub rpc_id: Option<String>,
+    pub preview: Option<String>,
+}
+
+const PREVIEW_MAX: usize = 2048;
+const PREVIEW_DEPTH: u8 = 8;
+const PREVIEW_ARRAY_CAP: usize = 50;
+
+/// True when a key looks like it holds a secret → replaced with "[redacted]"
+/// in previews. Heuristic denylist, not a security boundary.
+fn key_is_secret(k: &str) -> bool {
+    // normalize separators so x-api-key / api-key / api.key all match api_key
+    let k = k
+        .to_lowercase()
+        .replace(['-', ' ', '.'], "_");
+    ["token", "authorization", "api_key", "apikey", "secret", "password", "cookie"]
+        .iter()
+        .any(|s| k.contains(s))
+}
+
+fn redact_json(v: &serde_json::Value, depth: u8) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(m) => {
+            if depth == 0 {
+                return Value::String("…".into());
+            }
+            let mut out = serde_json::Map::with_capacity(m.len());
+            for (k, val) in m {
+                out.insert(
+                    k.clone(),
+                    if key_is_secret(k) {
+                        Value::String("[redacted]".into())
+                    } else {
+                        redact_json(val, depth - 1)
+                    },
+                );
+            }
+            Value::Object(out)
+        }
+        Value::Array(a) => {
+            let mut out: Vec<Value> = a
+                .iter()
+                .take(PREVIEW_ARRAY_CAP)
+                .map(|x| redact_json(x, depth))
+                .collect();
+            if a.len() > PREVIEW_ARRAY_CAP {
+                out.push(Value::String(format!("…+{}", a.len() - PREVIEW_ARRAY_CAP)));
+            }
+            Value::Array(out)
+        }
+        Value::String(s) if s.chars().count() > 256 => {
+            Value::String(s.chars().take(255).collect::<String>() + "…")
+        }
+        _ => v.clone(),
+    }
+}
+
+/// Extract audit info from a request body: JSON-RPC `method`/`id` plus a
+/// redacted, size-capped preview of `params` (whole document when not a
+/// JSON-RPC envelope). Non-JSON bodies yield no preview — we never log
+/// arbitrary payloads.
+pub fn audit_extract(body: &[u8]) -> AuditInfo {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return AuditInfo::default();
+    };
+    let rpc_id = match v.get("id") {
+        Some(serde_json::Value::Null) | None => None,
+        // capped like rpc_method: the ring + jsonl retain every entry
+        Some(serde_json::Value::String(s)) => Some(s.chars().take(64).collect()),
+        // numbers/null-ish and any other JSON scalar → their JSON text
+        Some(i) => Some(i.to_string().chars().take(64).collect()),
+    };
+    let mut preview = redact_json(v.get("params").unwrap_or(&v), PREVIEW_DEPTH).to_string();
+    if preview.len() > PREVIEW_MAX {
+        let mut end = PREVIEW_MAX;
+        while !preview.is_char_boundary(end) {
+            end -= 1;
+        }
+        preview.truncate(end);
+        preview.push('…');
+    }
+    AuditInfo {
+        rpc_method: v
+            .get("method")
+            .and_then(|m| m.as_str())
+            .map(|s| s.chars().take(64).collect()),
+        rpc_id,
+        preview: Some(preview),
     }
 }
 

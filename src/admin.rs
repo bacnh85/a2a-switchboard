@@ -20,10 +20,9 @@ pub struct DashboardTmpl {
     pub active_nav: &'static str,
     pub localhost: bool,
     pub authed: bool,
-    pub accepted: usize,
-    pub pending: usize,
-    pub revoked: usize,
-    pub healthy: usize,
+    pub errors: u64,
+    pub avg_ms: u64,
+    pub pending: u64,
     pub total_routes: u64,
     pub recent: Vec<RouteEntry>,
     pub peers_json: String,
@@ -78,6 +77,9 @@ pub struct LogsTmpl {
     pub q_src: String,
     pub q_dst: String,
     pub q_status: String,
+    pub q_method: String,
+    /// true when ?errors=1 is active
+    pub errors_only: bool,
     pub total: u64,
 }
 
@@ -96,39 +98,33 @@ pub struct SettingsTmpl {
 
 pub async fn dashboard(State(app): State<AppState>) -> Response {
     let inner = app.inner.read().await;
-    let accepted = inner
-        .peers
-        .iter()
-        .filter(|p| p.state == PeerState::Accepted)
-        .count();
-    let healthy = inner
-        .peers
-        .iter()
-        .filter(|p| p.state == PeerState::Accepted && p.healthy == Some(true))
-        .count();
     let peers_json = topology_peers(&app, &inner.peers).to_string();
+    let pending = inner
+        .peers
+        .iter()
+        .filter(|p| p.state == PeerState::Pending)
+        .count() as u64;
+    drop(inner);
+    // RED-style stats straight from the routing ring (last 1000 requests).
+    let (total_routes, errors, latency_sum) = {
+        let ring = app.log_ring.read().await;
+        ring.iter().fold((0u64, 0u64, 0u64), |(t, e, l), x| {
+            (t + 1, e + (x.status >= 400) as u64, l + x.latency_ms)
+        })
+    };
+    let avg_ms = latency_sum.checked_div(total_routes).unwrap_or(0);
     let t = DashboardTmpl {
         title: "Dashboard",
         active_nav: "dashboard",
         localhost: is_localhost(),
         authed: app.admin_set().await,
-        accepted,
-        pending: inner
-            .peers
-            .iter()
-            .filter(|p| p.state == PeerState::Pending)
-            .count(),
-        revoked: inner
-            .peers
-            .iter()
-            .filter(|p| p.state == PeerState::Revoked)
-            .count(),
-        healthy,
-        total_routes: app.log_ring.read().await.len() as u64,
+        errors,
+        avg_ms,
+        pending,
+        total_routes,
         recent: app.recent_log(8).await,
         peers_json,
     };
-    drop(inner);
     Html(t.render().unwrap_or_default()).into_response()
 }
 
@@ -163,7 +159,7 @@ pub async fn peers_page(State(app): State<AppState>) -> Response {
 
 pub async fn logs_page(State(app): State<AppState>) -> Response {
     let t = LogsTmpl {
-        title: "Routing log",
+        title: "Communication log",
         active_nav: "logs",
         localhost: is_localhost(),
         authed: app.admin_set().await,
@@ -172,48 +168,118 @@ pub async fn logs_page(State(app): State<AppState>) -> Response {
         q_src: String::new(),
         q_dst: String::new(),
         q_status: String::new(),
+        q_method: String::new(),
+        errors_only: false,
         total: app.log_ring.read().await.len() as u64,
     };
     Html(t.render().unwrap_or_default()).into_response()
 }
 
-/// GET /logs?src=&dst=&status=&n= — full audit view over routing.jsonl
-/// (not just the in-memory ring). Filters are substring matches on the
-/// caller/destination names and exact match on HTTP status. `n` caps rows
-/// (default 500, max 5000).
+/// GET /logs?src=&dst=&status=&method=&errors=1&n= — full audit view over
+/// routing.jsonl (not just the in-memory ring). Filters are substring matches
+/// on the caller/destination/method names and exact match on HTTP status.
+/// `errors=1` keeps status>=400 only. `n` caps rows (default 500, max 5000).
 pub async fn logs_full(State(app): State<AppState>, Query(q): Query<LogsQuery>) -> Response {
-    let entries = read_routing_log(&app.data_dir);
-    let src = q.src.unwrap_or_default();
-    let dst = q.dst.unwrap_or_default();
-    let status = q.status.unwrap_or_default();
-    let n = q.n.unwrap_or(500).clamp(1, 5000);
-    let status_i: Option<u16> = status.parse().ok();
-
-    let mut out: Vec<RouteEntry> = entries
-        .into_iter()
-        .filter(|e| {
-            (src.is_empty() || e.src.contains(&src))
-                && (dst.is_empty() || e.dst.contains(&dst))
-                && status_i.map(|s| e.status == s).unwrap_or(true)
-        })
-        .collect();
-    out.reverse();
-    out.truncate(n);
-    let total = out.len() as u64;
-
+    let filters = LogFilters::from_query(q);
+    let entries = filter_routing_log_spawn(&app, &filters).await;
+    let total = entries.len() as u64;
     let t = LogsTmpl {
         title: "Communication log",
         active_nav: "logs",
         localhost: is_localhost(),
         authed: app.admin_set().await,
-        entries: out,
+        entries,
         truncated: false,
-        q_src: src,
-        q_dst: dst,
-        q_status: status,
+        q_src: filters.src.clone(),
+        q_dst: filters.dst.clone(),
+        q_status: filters.status.clone().unwrap_or_default(),
+        q_method: filters.method.clone(),
+        errors_only: filters.errors_only,
         total,
     };
     Html(t.render().unwrap_or_default()).into_response()
+}
+
+/// GET /logs/export?<filters> — the filtered audit trail as routing.jsonl
+/// lines (newest first). Machine-readable for offline retention.
+pub async fn logs_export(State(app): State<AppState>, Query(q): Query<LogsQuery>) -> Response {
+    let filters = LogFilters::from_query(q);
+    let entries = filter_routing_log_spawn(&app, &filters).await;
+    let mut body = String::new();
+    for e in &entries {
+        if let Ok(json) = serde_json::to_string(e) {
+            body.push_str(&json);
+            body.push('\n');
+        }
+    }
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/x-ndjson"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"routing.jsonl\"",
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+#[derive(Default, Clone)]
+struct LogFilters {
+    src: String,
+    dst: String,
+    status: Option<String>,
+    method: String,
+    errors_only: bool,
+    n: usize,
+}
+
+impl LogFilters {
+    fn from_query(q: LogsQuery) -> Self {
+        Self {
+            src: q.src.unwrap_or_default(),
+            dst: q.dst.unwrap_or_default(),
+            status: q.status.filter(|s| !s.is_empty()),
+            method: q.method.unwrap_or_default(),
+            errors_only: q.errors.as_deref().is_some_and(|v| v == "1" || v == "true"),
+            n: q.n.unwrap_or(500).clamp(1, 5000),
+        }
+    }
+}
+
+/// Read routing.jsonl, apply filters, newest first, capped at `n`.
+/// Off the async runtime — routing.jsonl grows unboundedly (append-only).
+async fn filter_routing_log_spawn(app: &AppState, f: &LogFilters) -> Vec<RouteEntry> {
+    let dir = app.data_dir.clone();
+    let f = f.clone();
+    tokio::task::spawn_blocking(move || filter_routing_log(&dir, &f))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("routing log filter task failed: {e}");
+            Vec::new()
+        })
+}
+
+fn filter_routing_log(data_dir: &std::path::Path, f: &LogFilters) -> Vec<RouteEntry> {
+    let status_i: Option<u16> = f.status.as_deref().and_then(|s| s.parse().ok());
+    let mut out: Vec<RouteEntry> = read_routing_log(data_dir)
+        .into_iter()
+        .filter(|e| {
+            (f.src.is_empty() || e.src.contains(&f.src))
+                && (f.dst.is_empty() || e.dst.contains(&f.dst))
+                && status_i.map(|s| e.status == s).unwrap_or(true)
+                && (!f.errors_only || e.status >= 400)
+                && (f.method.is_empty()
+                    || e.method.contains(&f.method)
+                    || e.rpc_method
+                        .as_deref()
+                        .is_some_and(|m| m.contains(&f.method)))
+        })
+        .collect();
+    out.reverse();
+    out.truncate(f.n);
+    out
 }
 
 /// GET /peers/{name} — detail page: agent card (capabilities/skills),
@@ -238,25 +304,29 @@ pub async fn peer_detail(State(app): State<AppState>, Path(name): Path<String>) 
     };
     let card_pretty = serde_json::to_string_pretty(&peer.card).unwrap_or_else(|_| "{}".into());
 
-    // per-peer traffic from routing.jsonl (peer appears as src or dst)
-    let all = read_routing_log(&app.data_dir);
-    let traffic: Vec<RouteEntry> = all
-        .iter()
-        .filter(|e| e.src == name || e.dst == name)
-        .rev()
-        .take(100)
-        .cloned()
-        .collect();
-    let (ok_count, err_count) =
-        all.iter()
-            .filter(|e| e.src == name || e.dst == name)
-            .fold((0u64, 0u64), |(ok, err), e| {
-                if e.status < 400 {
-                    (ok + 1, err)
-                } else {
-                    (ok, err + 1)
-                }
-            });
+    // per-peer traffic from routing.jsonl (peer appears as src or dst) —
+    // filtered inside spawn_blocking so the async worker never blocks on I/O
+    let dir = app.data_dir.clone();
+    let peer_name = name.clone();
+    let all = tokio::task::spawn_blocking(move || {
+        read_routing_log(&dir)
+            .into_iter()
+            .filter(|e| e.src == peer_name || e.dst == peer_name)
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("routing log read task failed: {e}");
+        Vec::new()
+    });
+    let traffic: Vec<RouteEntry> = all.iter().rev().take(100).cloned().collect();
+    let (ok_count, err_count) = all.iter().fold((0u64, 0u64), |(ok, err), e| {
+        if e.status < 400 {
+            (ok + 1, err)
+        } else {
+            (ok, err + 1)
+        }
+    });
     let traffic_total = ok_count + err_count;
 
     let t = PeerDetailTmpl {
@@ -284,6 +354,8 @@ pub struct LogsQuery {
     pub src: Option<String>,
     pub dst: Option<String>,
     pub status: Option<String>,
+    pub method: Option<String>,
+    pub errors: Option<String>,
     pub n: Option<usize>,
 }
 
