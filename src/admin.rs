@@ -286,33 +286,6 @@ fn topology_peers(app: &AppState, peers: &[Peer]) -> serde_json::Value {
         .collect::<Vec<_>>())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_local_source;
-
-    #[test]
-    fn local_source_detection() {
-        // loopback v4/v6 + IPv4-mapped loopback
-        assert!(is_local_source("127.0.0.1"));
-        assert!(is_local_source("127.8.9.10"));
-        assert!(is_local_source("::1"));
-        assert!(is_local_source("::ffff:127.0.0.1"));
-        // podman/docker bridge sources
-        assert!(is_local_source("10.88.0.35"));
-        assert!(is_local_source("10.0.0.1"));
-        assert!(is_local_source("172.17.0.1"));
-        assert!(is_local_source("172.31.255.254"));
-        assert!(is_local_source("192.168.1.42"));
-        assert!(is_local_source("::ffff:10.88.0.35"));
-        // public / non-local sources must NOT pass the gate
-        assert!(!is_local_source("8.8.8.8"));
-        assert!(!is_local_source("172.32.0.1"));
-        assert!(!is_local_source("192.169.0.1"));
-        assert!(!is_local_source("2001:db8::1"));
-        assert!(!is_local_source("not-an-ip"));
-    }
-}
-
 /// SSE stream of new routing entries (event: route) + pings. The session is
 /// re-validated every 15s regardless of event frequency, so logout/expiry
 /// closes the stream (instead of streaming forever on a busy gateway).
@@ -348,4 +321,31 @@ pub async fn sse_events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_source;
+
+    #[test]
+    fn local_source_detection() {
+        // loopback v4/v6 + IPv4-mapped loopback
+        assert!(is_local_source("127.0.0.1"));
+        assert!(is_local_source("127.8.9.10"));
+        assert!(is_local_source("::1"));
+        assert!(is_local_source("::ffff:127.0.0.1"));
+        // podman/docker bridge sources
+        assert!(is_local_source("10.88.0.35"));
+        assert!(is_local_source("10.0.0.1"));
+        assert!(is_local_source("172.17.0.1"));
+        assert!(is_local_source("172.31.255.254"));
+        assert!(is_local_source("192.168.1.42"));
+        assert!(is_local_source("::ffff:10.88.0.35"));
+        // public / non-local sources must NOT pass the gate
+        assert!(!is_local_source("8.8.8.8"));
+        assert!(!is_local_source("172.32.0.1"));
+        assert!(!is_local_source("192.169.0.1"));
+        assert!(!is_local_source("2001:db8::1"));
+        assert!(!is_local_source("not-an-ip"));
+    }
 }
