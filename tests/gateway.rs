@@ -449,7 +449,10 @@ async fn channel_roundtrip_full() {
     assert_eq!(e.rpc_method.as_deref(), Some("message/send"));
     assert_eq!(e.rpc_id.as_deref(), Some("ch1"));
     let preview = e.preview.as_deref().expect("preview on channel path");
-    assert!(preview.contains("[redacted]"), "x-api-key redacted: {preview}");
+    assert!(
+        preview.contains("[redacted]"),
+        "x-api-key redacted: {preview}"
+    );
     assert!(!preview.contains("sk-chan"));
     assert!(preview.contains("hi"));
 }
@@ -1301,7 +1304,10 @@ async fn audit_preview_captured_and_redacted() {
         .route(
             "/",
             axum::routing::post(|| async {
-                (axum::http::StatusCode::OK, axum::Json(serde_json::json!({"ok":1})))
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({"ok":1})),
+                )
             }),
         )
         .route(
@@ -1398,9 +1404,7 @@ async fn audit_endpoints_require_admin_session() {
     let sid = cookie.split(';').next().unwrap().to_string();
     let r = router
         .clone()
-        .oneshot(
-            req("GET", "/logs/export", None, None).with_header("cookie", &sid),
-        )
+        .oneshot(req("GET", "/logs/export", None, None).with_header("cookie", &sid))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -1419,9 +1423,7 @@ async fn audit_endpoints_require_admin_session() {
     // authed /logs/full renders the page too
     let r = router
         .clone()
-        .oneshot(
-            req("GET", "/logs/full", None, None).with_header("cookie", &sid),
-        )
+        .oneshot(req("GET", "/logs/full", None, None).with_header("cookie", &sid))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -1439,7 +1441,11 @@ async fn old_format_routing_log_still_parses() {
         "{\"ts\":1786000000,\"src\":\"legacy-a\",\"dst\":\"legacy-b\",\"method\":\"POST\",\"status\":200,\"bytes\":10,\"latency_ms\":5}\n",
     )
     .unwrap();
-    let r = router.clone().oneshot(req("GET", "/logs/full", None, None)).await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/logs/full", None, None))
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let html = String::from_utf8_lossy(&b);
@@ -1463,9 +1469,7 @@ async fn audit_extract_bounds() {
     use a2a_switchboard::state::audit_extract;
 
     let long_id = "i".repeat(10_000);
-    let body = format!(
-        r#"{{"jsonrpc":"2.0","id":"{long_id}","method":"m","params":{{}}}}"#
-    );
+    let body = format!(r#"{{"jsonrpc":"2.0","id":"{long_id}","method":"m","params":{{}}}}"#);
     let a = audit_extract(body.as_bytes());
     assert!(a.rpc_id.as_deref().unwrap().len() <= 64);
 

@@ -147,12 +147,18 @@ const PREVIEW_ARRAY_CAP: usize = 50;
 /// in previews. Heuristic denylist, not a security boundary.
 fn key_is_secret(k: &str) -> bool {
     // normalize separators so x-api-key / api-key / api.key all match api_key
-    let k = k
-        .to_lowercase()
-        .replace(['-', ' ', '.'], "_");
-    ["token", "authorization", "api_key", "apikey", "secret", "password", "cookie"]
-        .iter()
-        .any(|s| k.contains(s))
+    let k = k.to_lowercase().replace(['-', ' ', '.'], "_");
+    [
+        "token",
+        "authorization",
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+        "cookie",
+    ]
+    .iter()
+    .any(|s| k.contains(s))
 }
 
 fn redact_json(v: &serde_json::Value, depth: u8) -> serde_json::Value {
