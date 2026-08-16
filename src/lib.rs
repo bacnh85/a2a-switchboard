@@ -63,6 +63,9 @@ pub fn router(app: Arc<App>) -> axum::Router {
         .route("/.well-known/agent.json", get(peers::agent_card))
         .route("/.well-known/agent-card.json", get(peers::agent_card))
         .route("/peer/{name}", axum::routing::any(peers::proxy))
+        // ponytail: empty-rest match; axum 0.8 wildcard does not match "" so
+        // `/peer/name/` (agent-card URLs end in `/`) fell through to admin 303
+        .route("/peer/{name}/", axum::routing::any(peers::proxy))
         .route("/peer/{name}/{*rest}", axum::routing::any(peers::proxy))
         .route("/channel", get(channel::channel_open))
         .route("/channel/response/{id}", post(channel::channel_response))

@@ -137,6 +137,30 @@ async fn admission_flow() {
 }
 
 #[tokio::test]
+async fn trailing_slash_peer_routes_to_proxy() {
+    // `/peer/name/` (agent-card URL form) must reach the proxy, not fall
+    // through to the admin UI redirect. Upstream unreachable → 502 proves it.
+    let (router, _app, _gw, boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"slash","url":"http://127.0.0.1:1/","card":{"name":"slash","skills":[]}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let r = router
+        .clone()
+        .oneshot(req("POST", "/peer/slash/", Some(&boot), Some("{}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
 async fn bootstrap_auto_accepts() {
     let (router, app, _gw, boot) = test_app().await;
     let r = router
