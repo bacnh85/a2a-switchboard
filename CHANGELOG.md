@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-16
+
+### Added
+
+- **Peer detail pages** (`/peers/{name}`): full agent-card inspection —
+  capabilities and skills rendered as pretty JSON, raw card (collapsible),
+  identity/liveness metadata (registered, last seen, source IPs, last
+  error, reverse-channel state), and per-peer traffic history with ok/err
+  counts read back from `routing.jsonl`.
+- **Full communication log audit** (`/logs` + `/logs/full`): the routing
+  log now reads the persistent `routing.jsonl` (not just the 1000-entry
+  in-memory ring) with substring filters on caller/destination and exact
+  status match. The logs page gained a filter bar; history pages out the
+  full JSONL trail.
+- **Peer source-IP capture**: the switchboard records `reg_ip` (address a
+  peer registered from) and `last_ip` (address of its most recent
+  successful exchange — proxied request or reverse channel). Display-only,
+  never used for auth.
+
+### Changed
+
+- Peer list (pending + accepted) shows the peer's source IP and
+  last-seen/registered as local date-time (`YYYY-MM-DD HH:MM:SS`) instead
+  of raw unix epochs. Peer names link to their detail page.
+- Dashboard communication log and routing-log tables show local date-time
+  timestamps.
+- `RouteEntry` is now deserializable so the JSONL audit trail can be read
+  back into the UI.
+
 ### Fixed
 
 - First-time admin password set now works behind podman/docker port
