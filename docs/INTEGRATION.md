@@ -4,6 +4,8 @@ Everything an A2A client needs to join the switchboard: registration,
 discovery, proxied calls, and the reverse-channel protocol for firewalled
 peers. All endpoints are plain HTTP/JSON-RPC — any A2A-compatible client works.
 
+> **Client recipes:** per-client guides live in [`integrations/`](integrations/README.md) — Hermes, Pi coding agent, and a generic A2A client.
+
 ## Authentication
 
 Two token classes (shown on first run and in Settings):

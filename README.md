@@ -102,6 +102,7 @@ curl -X POST http://127.0.0.1:9920/peer/hermes/ \
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker/compose/binary, TLS termination, firewall, systemd, backup |
 | [docs/INTEGRATION.md](docs/INTEGRATION.md) | Registration, directory, proxy, reverse-channel protocol, pi-a2a config |
 | [docs/AGENTS-ONBOARDING.md](docs/AGENTS-ONBOARDING.md) | AI agent self-onboarding: PI, Hermes, generic A2A clients |
+| [docs/integrations/](docs/integrations/README.md) | Per-client integration recipes (Hermes, Pi, general) |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model, token classes, SSRF posture, known limitations |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Build, test, architecture, adding features, release checklist |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
