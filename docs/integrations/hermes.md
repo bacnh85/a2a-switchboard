@@ -149,10 +149,45 @@ Either mechanism alone suffices; the caller_token is authoritative,
 >         pass
 > ```
 
-## 4. Heartbeat (optional but recommended)
+## 4. Heartbeat — PATCH-first (switchboard >= 0.5)
 
-Re-POST `/register` every 60s (same body) to refresh `last_seen`, url, card.
-Idempotent for bootstrap-accepted peers; never re-discloses the caller token.
+Steady-state heartbeats use **PATCH /register** (partial self-update) with the
+caller_token as auth. POST is only for first registration or recovery.
+
+```
+PATCH <GATEWAY_ORIGIN>/register
+Authorization: Bearer <caller_token>
+Content-Type: application/json
+
+{"name": "<peer-name>", "url": "<public-url>", "card": {"skills": [...], "capabilities": [...]}, "upstream_token": "..."}
+```
+
+Status codes:
+- **200** updated → done; `last_seen`/`last_ip` refreshed
+- **401** no-or-unknown token → clear cached token, fall back to POST re-register
+- **403** revoked → FAIL, do NOT fall back to POST
+- **404** entry deleted → POST to re-register
+- **405** old gateway (no PATCH route) → stick to POST for the session
+- **409** different identity → FAIL, no fallback
+
+Client implementation:
+- `_caller_token(gw)`: config value wins (unless rejected this session via `_GW_CT_POISONED`), else `~/.hermes/a2a_caller_token.json` cache
+- `_register_gateway()`: PATCH-first when caller_token exists; POST for first registration; rate-limit heartbeats to ≤ 1/60s
+- `_GW_CT_POISONED` (session-scoped): a config-provided caller_token rejected with 401 is bypassed for the rest of the process
+- `_GW_PATCH_DISABLED` (session-scoped): 405 → POST-only for the session, no DELETE (held token still valid)
+- Card on every PATCH: `{skills: <installed skill names>, capabilities: <platform_toolsets.a2a>}` — directory surfaces these to auth'd callers
+
+Registration semantics (from `src/peers.rs` `register`):
+
+- bootstrap token → auto-`accepted`; gateway token → `pending` (admin accepts).
+- `201 {"status":"registered", ..., "caller_token":"..."}` on first register;
+  `200 {"status":"updated", ...}` on re-register — `caller_token` appears
+  **only when freshly minted**.
+- Recovery when lost: `DELETE /register?name=<name>` with the shared token,
+  then POST again → fresh caller_token. Old token invalidated.
+- **Identity is bound to the presenting token's fingerprint.** Re-registering
+  a name with a different token → `409 "peer name already registered by
+  another identity"`. Use the SAME token each time.
 
 ## 5. Reverse channel (optional — NAT'd / unreachable instances only)
 
