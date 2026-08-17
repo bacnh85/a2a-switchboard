@@ -62,7 +62,12 @@ pub fn router(app: Arc<App>) -> axum::Router {
         ));
 
     Router::new()
-        .route("/register", post(peers::register).delete(peers::deregister))
+        .route(
+            "/register",
+            post(peers::register)
+                .patch(peers::update)
+                .delete(peers::deregister),
+        )
         .route("/.well-known/agent.json", get(peers::agent_card))
         .route("/.well-known/agent-card.json", get(peers::agent_card))
         .route("/peer/{name}", axum::routing::any(peers::proxy))

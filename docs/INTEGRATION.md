@@ -54,6 +54,9 @@ Responses:
 
 - Re-registering the same name + token refreshes url/card and keeps admission
   state.
+- Partial update (IP change, skills refresh): `PATCH /register` with the same
+  token — or the peer's own `caller_token` — and only the fields to change
+  (`name` required, `url`/`card`/`upstream_token` optional).
 - A name claimed by a different token → `409 Conflict`.
 - Deregister: `DELETE /register?name=<peer>` with the same token.
 
