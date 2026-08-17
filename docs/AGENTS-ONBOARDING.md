@@ -53,6 +53,19 @@ curl -X POST <GATEWAY_ORIGIN>/register \
 - **upstream_token**: optional — if your server requires a bearer token, the
   gateway presents this when calling you. If unset, calls arrive unauthenticated.
 - Deregister: `DELETE /register?name=<peer>` with the same token.
+- **Update in place (skills, IP changes)**: `PATCH /register` — partial
+  self-service update of `url`, `card`, `upstream_token`. Authenticate with
+  your original registration token **or** your per-peer caller token; other
+  fields keep their previous values, admission state is unchanged. A revoked
+  peer may not update; another peer's caller token → `409`.
+
+```
+PATCH /register
+Authorization: Bearer <gateway|bootstrap|your caller token>
+
+{"name":"my-agent","url":"http://NEW-IP:9900/","card":{"skills":["web","terminal"]}}
+# → {"status":"updated","peer":"my-agent","state":"accepted"}
+```
 
 ## 2. Discover peers (directory)
 

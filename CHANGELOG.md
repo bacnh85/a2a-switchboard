@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`PATCH /register` — partial self-service peer update**: peers refresh
+  their `url` (IP changes), `card` (skills/capabilities), or `upstream_token`
+  without re-sending the full registration body. Authenticated by the original
+  registration token (fingerprint-matched) **or** the peer's own `caller_token`
+  (previously unusable for updates). Admission state is never changed by
+  PATCH; revoked peers are rejected (`403`); another identity's token → `409`.
+
 ## [0.4.0] - 2026-08-16
 
 ### Added

@@ -200,6 +200,124 @@ pub async fn deregister(
         .into_response()
 }
 
+/// PATCH /register — partial self-service update (url, card, upstream_token).
+/// Auth: the original registration token (gateway/bootstrap, fingerprint must
+/// match the registrant) or the peer's own caller token. Admission state is
+/// never changed by PATCH; a revoked peer may not update.
+#[derive(Deserialize)]
+pub struct PatchBody {
+    name: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    card: Option<serde_json::Value>,
+    #[serde(default)]
+    upstream_token: Option<String>,
+}
+
+pub async fn update(
+    State(app): State<AppState>,
+    ClientIp(client_ip): ClientIp,
+    headers: HeaderMap,
+    Json(p): Json<PatchBody>,
+) -> Response {
+    if !app.limiter.allow(&client_ip, 20) {
+        return too_many();
+    }
+    let Some(token) = extract_token(&headers) else {
+        return unauthorized();
+    };
+    let name = p.name.trim().to_string();
+    if let Some(u) = p.url.as_deref() {
+        if let Err(e) = validate_url(u) {
+            return err(StatusCode::UNPROCESSABLE_ENTITY, &format!("url: {e}"));
+        }
+    }
+    if let Some(t) = p.upstream_token.as_deref() {
+        if t.len() > 512 {
+            return err(StatusCode::UNPROCESSABLE_ENTITY, "upstream_token too long");
+        }
+    }
+    if let Some(c) = p.card.as_ref() {
+        if serde_json::to_string(c)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX)
+            > 256 * 1024
+        {
+            return err(StatusCode::PAYLOAD_TOO_LARGE, "card too large");
+        }
+    }
+
+    let fp = fingerprint(&token);
+    let mut inner = app.inner.write().await;
+    // Resolve the token to an identity BEFORE the name lookup: a token that is
+    // neither shared nor any peer's caller_token must 401 without disclosing
+    // whether the name exists (pending/revoked peers are unlisted by design).
+    let shared = {
+        let (gateway, bootstrap) = (inner.gateway_token.clone(), inner.bootstrap_token.clone());
+        classify_token(&token, &gateway, &bootstrap).is_some()
+    };
+    let owner = if shared {
+        None
+    } else {
+        inner
+            .peers
+            .iter()
+            .find(|p| {
+                p.caller_token
+                    .as_deref()
+                    .is_some_and(|ct| crate::auth::ct_eq(ct, &token))
+            })
+            .map(|p| p.name.clone())
+    };
+    if !shared && owner.is_none() {
+        return unauthorized();
+    }
+    let Some(idx) = inner.peers.iter().position(|x| x.name == name) else {
+        return err(StatusCode::NOT_FOUND, "no such peer");
+    };
+    // Authorization: shared token must match the registrant fingerprint; a
+    // caller token must be this peer's own.
+    let authorized = if shared {
+        inner.peers[idx].fingerprint == fp
+    } else {
+        owner.as_deref() == Some(name.as_str())
+    };
+    if !authorized {
+        return err(StatusCode::CONFLICT, "peer registered by another identity");
+    }
+    if inner.peers[idx].state == PeerState::Revoked {
+        return forbidden();
+    }
+    {
+        let peer = &mut inner.peers[idx];
+        if let Some(u) = p.url {
+            peer.url = u;
+        }
+        if let Some(c) = p.card {
+            peer.card = c;
+        }
+        if let Some(t) = p.upstream_token {
+            peer.upstream_token = Some(t);
+        }
+        peer.last_seen = Some(now());
+        peer.last_ip = Some(client_ip);
+    }
+    let state = inner.peers[idx].state;
+    drop(inner);
+    app.persist().await;
+    let state_s = match state {
+        PeerState::Pending => "pending",
+        PeerState::Accepted => "accepted",
+        PeerState::Revoked => "revoked",
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status":"updated", "peer": name, "state": state_s})),
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 pub struct DeregQuery {
     pub name: String,

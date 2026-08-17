@@ -1492,3 +1492,269 @@ async fn audit_extract_bounds() {
     assert!(!p.contains("sk-1") && !p.contains("sk-2") && !p.contains("Bearer z"));
     assert!(p.contains("v"));
 }
+
+#[tokio::test]
+async fn patch_update_self_service() {
+    let (router, app, gw, _boot) = test_app().await;
+    // register with bootstrap → accepted, caller token issued
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"hermes","url":"http://127.0.0.1:1/","card":{"name":"hermes","skills":["web"]}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let caller_token = {
+        let inner = app.inner.read().await;
+        inner.peers[0].caller_token.clone().unwrap()
+    };
+    // accept via admin endpoint
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/peers/hermes/accept", None, None))
+        .await
+        .unwrap();
+    // PATCH by the peer's own caller token — url + card partial update
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&caller_token),
+            Some(r#"{"name":"hermes","url":"http://10.0.0.5:9900/","card":{"name":"hermes","skills":["web","terminal"]}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    {
+        let inner = app.inner.read().await;
+        assert_eq!(inner.peers[0].url, "http://10.0.0.5:9900/");
+        assert!(inner.peers[0].card["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s == "terminal"));
+        assert_eq!(inner.peers[0].state, PeerState::Accepted);
+        assert!(inner.peers[0].last_ip.is_some());
+    }
+    // PATCH by original gateway token (fingerprint match) also allowed
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"hermes","url":"http://10.0.0.6:9900/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    {
+        let inner = app.inner.read().await;
+        assert_eq!(inner.peers[0].url, "http://10.0.0.6:9900/");
+    }
+    // PATCH with the WRONG peer's caller token → 409
+    // (register a second peer, try to patch hermes with its token)
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"other","url":"http://127.0.0.1:2/"}"#),
+        ))
+        .await
+        .unwrap();
+    let other_ct = {
+        let inner = app.inner.read().await;
+        inner
+            .peers
+            .iter()
+            .find(|p| p.name == "other")
+            .unwrap()
+            .caller_token
+            .clone()
+            .unwrap()
+    };
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&other_ct),
+            Some(r#"{"name":"hermes","url":"http://evil:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    // and hermes url unchanged
+    let inner = app.inner.read().await;
+    assert_eq!(inner.peers[0].url, "http://10.0.0.6:9900/");
+}
+
+#[tokio::test]
+async fn patch_unknown_peer_and_revoked() {
+    let (router, app, gw, _boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"ghost","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    // revoked peer may not self-update
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"gone","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/peers/gone/revoke", None, None))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"gone","url":"http://127.0.0.1:9/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    let inner = app.inner.read().await;
+    assert_eq!(inner.peers[0].url, "http://127.0.0.1:1/");
+}
+
+#[tokio::test]
+async fn patch_bad_url_and_oversize_rejected() {
+    let (router, _app, gw, _boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"v","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    // invalid scheme
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"v","url":"ftp://x"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // oversized upstream_token
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&gw),
+            Some(format!(r#"{{"name":"v","upstream_token":"{}"}}"#, "t".repeat(600)).as_str()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // no-token → 401
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            None,
+            Some(r#"{"name":"v","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn patch_shared_token_fingerprint_guard() {
+    let (router, app, gw, boot) = test_app().await;
+    // register with the GATEWAY token, then PATCH with the BOOTSTRAP token:
+    // valid shared credential, different identity → 409, url unchanged.
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"tw","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"tw","url":"http://evil:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    let inner = app.inner.read().await;
+    assert_eq!(inner.peers[0].url, "http://127.0.0.1:1/");
+    drop(inner);
+    // garbage token must 401 WITHOUT revealing name existence (pending peer
+    // 'tw' exists; 'ghost' does not — both look identical to the caller)
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some("garbage-token"),
+            Some(r#"{"name":"tw","url":"http://evil:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some("garbage-token"),
+            Some(r#"{"name":"ghost","url":"http://evil:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    // valid credential + unknown name still 404
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"ghost","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
