@@ -1,5 +1,8 @@
 /target
 data/
+.env
+.env.*
+!.env.example
 .env.local
 .agents/plans
 .pi
