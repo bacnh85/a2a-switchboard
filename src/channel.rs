@@ -1,3 +1,4 @@
+use crate::peers::{may_manage, resolve_caller};
 use crate::state::{fingerprint, AppState, PeerState};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -240,9 +241,12 @@ pub struct ChannelQuery {
 // ---------------------------------------------------------------------------
 
 /// GET /channel?name=<peer> — SSE: peer holds this open to receive proxied
-/// requests. The name is REQUIRED: with a shared token, several peers share
-/// one fingerprint, so fingerprint-only lookup would bind the wrong peer.
-/// The `hello` event carries the per-connection secret the peer must echo.
+/// requests. The name is REQUIRED and must be the caller's OWN peer: the
+/// caller is resolved via per-peer caller token (or, for legacy entries
+/// without one, the exact shared token that registered the peer). A shared
+/// token held by another registrant must never replace a peer's live channel
+/// (issue #3). The `hello` event carries the per-connection secret the peer
+/// must echo.
 pub async fn channel_open(
     State(app): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<ChannelQuery>,
@@ -252,11 +256,15 @@ pub async fn channel_open(
     let Some(token) = crate::auth::extract_token(&headers) else {
         return crate::auth::unauthorized();
     };
+    let caller = match resolve_caller(&app, &token).await {
+        Some(c) => c,
+        None => return crate::auth::unauthorized(),
+    };
     let fp = fingerprint(&token);
     let (name, state) = {
         let inner = app.inner.read().await;
         match inner.peers.iter().find(|p| p.name == q.name) {
-            Some(p) if p.fingerprint == fp => (p.name.clone(), p.state),
+            Some(p) if may_manage(&caller, p, &fp) => (p.name.clone(), p.state),
             Some(_) => {
                 return (StatusCode::FORBIDDEN, "peer name does not match this token")
                     .into_response()
@@ -351,11 +359,15 @@ pub async fn channel_response(
     let Some(token) = crate::auth::extract_token(&headers) else {
         return crate::auth::unauthorized();
     };
+    let caller = match resolve_caller(&app, &token).await {
+        Some(c) => c,
+        None => return crate::auth::unauthorized(),
+    };
     let fp = fingerprint(&token);
     let name_ok = {
         let inner = app.inner.read().await;
         match inner.peers.iter().find(|p| p.name == q.name) {
-            Some(p) => p.fingerprint == fp,
+            Some(p) => may_manage(&caller, p, &fp),
             None => false,
         }
     };

@@ -352,11 +352,17 @@ async fn channel_roundtrip_full() {
     // direct HTTP, carries the request.
     let (router, app, _gw, boot) = test_app().await;
     let reg = r#"{"name":"fw","url":"http://127.0.0.1:1/"}"#.to_string();
-    let _ = router
+    let r = router
         .clone()
         .oneshot(req("POST", "/register", Some(&boot), Some(&reg)))
         .await
         .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let ct: String = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["caller_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // channel=false in directory before connect
     let r = router
@@ -367,10 +373,10 @@ async fn channel_roundtrip_full() {
     let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     assert!(String::from_utf8_lossy(&b).contains(r#""channel":false"#));
 
-    // Open the channel as the peer (SSE).
+    // Open the channel as the peer (SSE) — the peer's own caller token.
     let sse = router
         .clone()
-        .oneshot(req("GET", "/channel?name=fw", Some(&boot), None))
+        .oneshot(req("GET", "/channel?name=fw", Some(&ct), None))
         .await
         .unwrap();
     assert_eq!(sse.status(), StatusCode::OK);
@@ -412,7 +418,8 @@ async fn channel_roundtrip_full() {
     let body_in = decode(env["body_b64"].as_str().unwrap());
     assert!(body_in.contains("message/send"));
 
-    // Peer posts the response — echoing the per-channel secret.
+    // Peer posts the response — with its own caller token, echoing the
+    // per-channel secret.
     let resp_json = serde_json::json!({
         "id": id,
         "status": 200,
@@ -425,7 +432,7 @@ async fn channel_roundtrip_full() {
         .oneshot(req(
             "POST",
             &format!("/channel/response/{id}?name=fw"),
-            Some(&boot),
+            Some(&ct),
             Some(&resp_json.to_string()),
         ))
         .await
@@ -459,21 +466,30 @@ async fn channel_roundtrip_full() {
 
 #[tokio::test]
 async fn channel_impersonation_rejected() {
-    // Two peers share the bootstrap token. Peer B must not answer peer A's
-    // pending request even when declaring name=A (secret binding).
+    // Two peers, each with their own caller token. Peer B must not answer
+    // peer A's pending request even when declaring name=A (secret binding),
+    // and must not open/replace A's channel (per-peer management, issue #3).
     let (router, _app, _gw, boot) = test_app().await;
+    let mut cts = std::collections::HashMap::new();
     for n in ["pa", "pb"] {
         let reg = serde_json::json!({"name": n, "url": "http://127.0.0.1:1/"}).to_string();
-        let _ = router
+        let r = router
             .clone()
             .oneshot(req("POST", "/register", Some(&boot), Some(&reg)))
             .await
             .unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+        let ct = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["caller_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        cts.insert(n.to_string(), ct);
     }
     // A opens a channel.
     let sse = router
         .clone()
-        .oneshot(req("GET", "/channel?name=pa", Some(&boot), None))
+        .oneshot(req("GET", "/channel?name=pa", Some(&cts["pa"]), None))
         .await
         .unwrap();
     let mut stream = sse.into_body().into_data_stream();
@@ -500,12 +516,31 @@ async fn channel_impersonation_rejected() {
     }
     let env: serde_json::Value = env.expect("envelope");
     let id = env["id"].as_u64().unwrap();
-    // B responds for A's id with the WRONG secret (B never opened a channel,
-    // so it cannot know A's secret — use a bogus one).
+    // B responds for A's id with its own caller token and the WRONG secret
+    // (B never opened A's channel, so it cannot know A's secret — use a
+    // bogus one). Cross-peer response must be rejected even though B is a
+    // legit token holder.
     let resp = serde_json::json!({
         "id": id, "status": 200, "headers": {},
         "body_b64": "", "chan_secret": "deadbeef",
     });
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/channel/response/{id}?name=pa"),
+            Some(&cts["pb"]),
+            Some(&resp.to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "B must not resolve A's request (identity rejected before secret check)"
+    );
+    // The SHARED bootstrap token must not answer A's request either — the
+    // gateway itself never posts channel responses (issue #3).
     let r = router
         .clone()
         .oneshot(req(
@@ -518,8 +553,20 @@ async fn channel_impersonation_rejected() {
         .unwrap();
     assert_eq!(
         r.status(),
-        StatusCode::NOT_FOUND,
-        "B must not resolve A's request"
+        StatusCode::FORBIDDEN,
+        "shared token must not resolve A's request"
+    );
+    // A shared token must not REPLACE a live peer's channel (in-flight
+    // envelope theft, issue #3).
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/channel?name=pa", Some(&boot), None))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "shared token must not bind another peer's channel"
     );
     // A's caller still hangs → drop A's channel → immediate 502.
     drop(stream);
@@ -531,14 +578,20 @@ async fn channel_impersonation_rejected() {
 async fn channel_oversized_response_rejected() {
     let (router, _app, _gw, boot) = test_app().await;
     let reg = r#"{"name":"big","url":"http://127.0.0.1:1/"}"#;
-    let _ = router
+    let r = router
         .clone()
         .oneshot(req("POST", "/register", Some(&boot), Some(reg)))
         .await
         .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let ct: String = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["caller_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let sse = router
         .clone()
-        .oneshot(req("GET", "/channel?name=big", Some(&boot), None))
+        .oneshot(req("GET", "/channel?name=big", Some(&ct), None))
         .await
         .unwrap();
     let mut stream = sse.into_body().into_data_stream();
@@ -576,7 +629,7 @@ async fn channel_oversized_response_rejected() {
         .oneshot(req(
             "POST",
             &format!("/channel/response/{id}?name=big"),
-            Some(&boot),
+            Some(&ct),
             Some(&resp.to_string()),
         ))
         .await
@@ -956,7 +1009,7 @@ async fn caller_header_attributed_and_stripped() {
 #[tokio::test]
 async fn channel_caller_header_drops_prefix() {
     let (router, app, _gw, boot) = test_app().await;
-    let _ = router
+    let r = router
         .clone()
         .oneshot(req(
             "POST",
@@ -966,10 +1019,16 @@ async fn channel_caller_header_drops_prefix() {
         ))
         .await
         .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let ct: String = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["caller_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
     // Open a live channel.
     let sse = router
         .clone()
-        .oneshot(req("GET", "/channel?name=fw2", Some(&boot), None))
+        .oneshot(req("GET", "/channel?name=fw2", Some(&ct), None))
         .await
         .unwrap();
     assert_eq!(sse.status(), StatusCode::OK);
@@ -1011,7 +1070,7 @@ async fn channel_caller_header_drops_prefix() {
                     .oneshot(req(
                         "POST",
                         &format!("/channel/response/{}?name=fw2", env["id"].as_u64().unwrap()),
-                        Some(&boot),
+                        Some(&ct),
                         Some(&resp_json.to_string()),
                     ))
                     .await
@@ -1076,8 +1135,9 @@ async fn per_peer_caller_token_attribution() {
         "token minted on upgrade re-register"
     );
 
-    // Repeat heartbeat: token NOT re-disclosed (already minted) — prevents
-    // shared-token holders from harvesting another peer's caller token.
+    // Repeat heartbeat by POST with the shared token is now rejected (the
+    // peer holds a caller token — issue #3); it must PATCH instead. Neither
+    // the 409 nor any other response re-discloses the caller token.
     let r = router
         .clone()
         .oneshot(req(
@@ -1088,6 +1148,24 @@ async fn per_peer_caller_token_attribution() {
         ))
         .await
         .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::CONFLICT,
+        "shared-token POST heartbeat must be rejected once a caller token exists"
+    );
+    // PATCH heartbeat with the per-peer token: succeeds and never includes
+    // the caller token in the response.
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&ct2),
+            Some(r#"{"name":"ct-peer","url":"http://127.0.0.1:9/","card":{}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
@@ -1142,6 +1220,45 @@ async fn peer_caller_token_authz_boundary() {
         "caller token must not register"
     );
 
+    // Self-deregistration with the peer's OWN caller token is allowed (it is
+    // the peer's management credential) — but first prove a DIFFERENT peer's
+    // caller token cannot deregister it (404, not yours).
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"az-other","url":"http://127.0.0.1:9/"}"#),
+        ))
+        .await
+        .unwrap();
+    let other_ct = {
+        let inner = _app.inner.read().await;
+        inner
+            .peers
+            .iter()
+            .find(|p| p.name == "az-other")
+            .unwrap()
+            .caller_token
+            .clone()
+            .unwrap()
+    };
+    let r = router
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            "/register?name=az-peer",
+            Some(&other_ct),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "another peer's caller token must not deregister"
+    );
     let r = router
         .clone()
         .oneshot(req("DELETE", "/register?name=az-peer", Some(&ct), None))
@@ -1149,21 +1266,56 @@ async fn peer_caller_token_authz_boundary() {
         .unwrap();
     assert_eq!(
         r.status(),
-        StatusCode::UNAUTHORIZED,
-        "caller token must not deregister"
+        StatusCode::OK,
+        "peer may deregister itself with its own caller token"
+    );
+
+    // The shared bootstrap token must NOT be able to deregister a peer that
+    // holds a caller token (cross-peer takeover, issue #3).
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"az-peer","url":"http://127.0.0.1:9/","card":{}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let ct2: String = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["caller_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/peers/az-peer/accept", None, None))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("DELETE", "/register?name=az-peer", Some(&boot), None))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "shared token must not deregister a peer that holds a caller token"
     );
 
     let r = router
         .clone()
-        .oneshot(req("GET", "/channel?name=az-peer", Some(&ct), None))
+        .oneshot(req("GET", "/channel?name=az-peer", Some(&ct2), None))
         .await
         .unwrap();
-    // Channel binding is fingerprint-based; a caller token's fingerprint does
-    // not match the registration token → rejected (403), never opened.
-    assert_ne!(
+    // A peer's own caller token MAY open its channel (per-peer identity);
+    // the SSE stream starts. Drop it immediately — this test only checks
+    // authorization.
+    assert_eq!(
         r.status(),
         StatusCode::OK,
-        "caller token must not open channels"
+        "peer may open its own channel with its caller token"
     );
 }
 
@@ -1185,14 +1337,31 @@ async fn update_response_reports_real_state() {
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["state"], "pending");
+    let ct = v["caller_token"].as_str().unwrap().to_string();
 
-    // Re-register (heartbeat) — must report the REAL state (pending), not accepted.
+    // Re-registering by POST with the shared token is now a 409: the peer
+    // holds a caller token, so the shared token is no longer its management
+    // credential (issue #3).
     let r = router
         .clone()
         .oneshot(req(
             "POST",
             "/register",
             Some(&gw),
+            Some(r#"{"name":"pend-peer","url":"http://127.0.0.1:9/","card":{}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+
+    // Heartbeat (PATCH with the per-peer caller token) — must report the
+    // REAL state (pending), not accepted.
+    let r = router
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            "/register",
+            Some(&ct),
             Some(r#"{"name":"pend-peer","url":"http://127.0.0.1:9/","card":{}}"#),
         ))
         .await
@@ -1206,7 +1375,7 @@ async fn update_response_reports_real_state() {
         "update response must reflect real admission state"
     );
 
-    // Accept, then re-register again → reports accepted.
+    // Accept, then heartbeat again (PATCH, caller token) → reports accepted.
     let r = router
         .clone()
         .oneshot(req("POST", "/peers/pend-peer/accept", None, None))
@@ -1216,9 +1385,9 @@ async fn update_response_reports_real_state() {
     let r = router
         .clone()
         .oneshot(req(
-            "POST",
+            "PATCH",
             "/register",
-            Some(&gw),
+            Some(&ct),
             Some(r#"{"name":"pend-peer","url":"http://127.0.0.1:9/","card":{}}"#),
         ))
         .await
@@ -1541,7 +1710,8 @@ async fn patch_update_self_service() {
         assert_eq!(inner.peers[0].state, PeerState::Accepted);
         assert!(inner.peers[0].last_ip.is_some());
     }
-    // PATCH by original gateway token (fingerprint match) also allowed
+    // PATCH by the shared token that registered the peer is now REJECTED:
+    // once a caller token exists, it is the only management credential (issue #3).
     let r = router
         .clone()
         .oneshot(req(
@@ -1552,10 +1722,17 @@ async fn patch_update_self_service() {
         ))
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.status(),
+        StatusCode::CONFLICT,
+        "shared token must not patch a peer that holds a caller token"
+    );
     {
         let inner = app.inner.read().await;
-        assert_eq!(inner.peers[0].url, "http://10.0.0.6:9900/");
+        assert_eq!(
+            inner.peers[0].url, "http://10.0.0.5:9900/",
+            "rejected PATCH must not change the url"
+        );
     }
     // PATCH with the WRONG peer's caller token → 409
     // (register a second peer, try to patch hermes with its token)
@@ -1593,7 +1770,7 @@ async fn patch_update_self_service() {
     assert_eq!(r.status(), StatusCode::CONFLICT);
     // and hermes url unchanged
     let inner = app.inner.read().await;
-    assert_eq!(inner.peers[0].url, "http://10.0.0.6:9900/");
+    assert_eq!(inner.peers[0].url, "http://10.0.0.5:9900/");
 }
 
 #[tokio::test]
@@ -1611,7 +1788,7 @@ async fn patch_unknown_peer_and_revoked() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
     // revoked peer may not self-update
-    let _ = router
+    let r = router
         .clone()
         .oneshot(req(
             "POST",
@@ -1621,6 +1798,12 @@ async fn patch_unknown_peer_and_revoked() {
         ))
         .await
         .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let gone_ct: String = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["caller_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let _ = router
         .clone()
         .oneshot(req("POST", "/peers/gone/revoke", None, None))
@@ -1631,7 +1814,7 @@ async fn patch_unknown_peer_and_revoked() {
         .oneshot(req(
             "PATCH",
             "/register",
-            Some(&gw),
+            Some(&gone_ct),
             Some(r#"{"name":"gone","url":"http://127.0.0.1:9/"}"#),
         ))
         .await

@@ -183,11 +183,14 @@ Registration semantics (from `src/peers.rs` `register`):
 - `201 {"status":"registered", ..., "caller_token":"..."}` on first register;
   `200 {"status":"updated", ...}` on re-register — `caller_token` appears
   **only when freshly minted**.
-- Recovery when lost: `DELETE /register?name=<name>` with the shared token,
-  then POST again → fresh caller_token. Old token invalidated.
-- **Identity is bound to the presenting token's fingerprint.** Re-registering
-  a name with a different token → `409 "peer name already registered by
-  another identity"`. Use the SAME token each time.
+- Recovery when the caller_token is lost: the peer can no longer self-recover
+  with a shared token (issue #3 hardening). Ask the operator to delete the
+  entry in the admin UI, then POST again → fresh caller_token. Old token
+  invalidated.
+- **Identity is bound to the per-peer caller token.** Once a caller token
+  exists, PATCH / DELETE / re-register / channel-open for that peer require
+  it; shared tokens are management credentials only for legacy entries that
+  predate caller tokens. Use the SAME caller token each time.
 
 ## 5. Reverse channel (optional — NAT'd / unreachable instances only)
 
