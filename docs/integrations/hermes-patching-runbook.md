@@ -52,11 +52,11 @@ Add `caller_token` and `upstream_token` to `a2a_gateway` in `~/.hermes/config.ya
 ```yaml
 a2a_gateway:
   url: http://172.30.55.22:9920
-  token: agw_81f0b088856edb5108239ed3c2e0bd28e2324de61f98b187fc101b6e99527685
+  token: <your-gateway-token>
   name: <your-peer-name>
   public_url: http://<your-lan-ip>:9900/
   caller_token: <see 2a>
-  upstream_token: w10YUEbGtM47aK7vhxuJgoGef6hq0M9nwxbAgfL
+  upstream_token: <your-upstream-token>
 ```
 
 **2a — get caller_token:**
@@ -67,12 +67,14 @@ If empty, register to mint one:
 ```bash
 curl -X POST http://172.30.55.22:9920/register \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer agw_81f0b088856edb5108239ed3c2e0bd28e2324de61f98b187fc101b6e99527685" \
+  -H "Authorization: Bearer <your-gateway-token>" \
   -d '{"name":"<your-peer-name>","url":"http://<your-lan-ip>:9900/"}'
 ```
 Save returned caller_token to config.yaml AND ~/.hermes/a2a_caller_token.json (chmod 0600).
 
-**2b — upstream_token** is the SAME for all peers: `w10YUEbGtM47aK7vhxuJgoGef6hq0M9nwxbAgfL`
+**2b — upstream_token**: the token the gateway presents to YOUR peer's inbound
+A2A server. Prefer a per-peer value (set at registration) — a fleet-wide shared
+upstream_token means anyone holding it can impersonate the gateway to every peer.
 
 ## Step 3: Respawn the gateway
 
