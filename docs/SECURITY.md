@@ -19,16 +19,20 @@ code.
 |---|---|
 | Gateway token | Register (→ pending), proxy through accepted peers, read directory |
 | Bootstrap token | Same as gateway + auto-accept on registration |
+| Peer caller token | Per-peer, minted at registration: proxy, **and manage its own peer** (PATCH / DELETE / re-register / channel-open). Never grants any other peer. |
 
-- Both are compared **in constant time** (`subtle` crate) — no timing oracle.
+- Both shared tokens are compared **in constant time** (`subtle` crate) — no timing oracle.
 - Tokens are stored plaintext in `state.json` (back it up as a secret) and
   shown in Settings. They are **never** written to the routing log, the Agent
   Card, or envelope payloads.
 
-**Known limitation (by design, v2):** peers currently share one token class,
-so an accepted peer could present another accepted peer's *declared identity*
-on the wire. Routing-log attribution is token-class level. The v2 plan is
-per-peer tokens (`peerTokens` already supported by pi-a2a clients).
+**Per-peer management (issue #3 fix):** once a peer holds a caller token,
+that token is the ONLY credential that may PATCH, DELETE, re-register, or
+open/replace that peer's channel — not even the shared gateway/bootstrap
+tokens (which every peer may hold) can act on it. Shared tokens still work
+for legacy entries registered before caller tokens existed (fingerprint must
+match the registering token). A peer that loses its caller token recovers via
+the operator (admin UI delete → re-register), never via a shared token.
 
 ## SSRF posture (deny-by-default egress)
 
@@ -42,9 +46,11 @@ per-peer tokens (`peerTokens` already supported by pi-a2a clients).
 
 ## Reverse channel security
 
-- `GET /channel?name=<peer>` binds the connection to the **name** (required —
-  shared tokens make fingerprint-only lookup ambiguous) and verifies the
-  token's fingerprint matches that peer.
+- `GET /channel?name=<peer>` binds the connection to the **name** (required)
+  and authorizes it per-peer: the peer's own caller token, or (legacy entries
+  without one only) the exact shared token that registered the peer. A shared
+  token held by another registrant can no longer replace a peer's live
+  channel (issue #3).
 - Each connection gets a random 32-byte **`chan_secret`** (delivered in the
   `hello` event). Every response must echo it. Because pending requests are
   keyed by (peer, secret), a shared-token peer **cannot** answer another

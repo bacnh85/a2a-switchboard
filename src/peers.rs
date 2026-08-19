@@ -82,7 +82,9 @@ pub async fn register(
     let mut inner = app.inner.write().await;
     if let Some(idx) = inner.peers.iter().position(|p| p.name == name) {
         let existing = &inner.peers[idx];
-        if existing.fingerprint != fp {
+        // Re-registration is a management action: once a peer holds a per-peer
+        // caller token, only that token may re-register it (issue #3).
+        if !may_manage(&Caller::Shared(kind), existing, &fp) {
             return err(
                 StatusCode::CONFLICT,
                 "peer name already registered by another identity",
@@ -158,7 +160,9 @@ pub async fn register(
         .into_response()
 }
 
-/// DELETE /register — deregister the calling peer (matched by token fingerprint + name).
+/// DELETE /register — deregister the calling peer. Once a peer holds a
+/// per-peer caller token, only that token may deregister it; shared operator
+/// tokens are restricted to legacy entries without a caller token (issue #3).
 pub async fn deregister(
     State(app): State<AppState>,
     ClientIp(client_ip): ClientIp,
@@ -171,23 +175,23 @@ pub async fn deregister(
     let Some(token) = extract_token(&headers) else {
         return unauthorized();
     };
-    let (gateway, bootstrap) = {
-        let inner = app.inner.read().await;
-        (inner.gateway_token.clone(), inner.bootstrap_token.clone())
-    };
-    if classify_token(&token, &gateway, &bootstrap).is_none() {
+    // Resolve the identity BEFORE the name lookup so an unknown token 401s
+    // without disclosing whether the name exists.
+    let Some(caller) = resolve_caller(&app, &token).await else {
         return unauthorized();
-    }
+    };
     let fp = fingerprint(&token);
     let mut inner = app.inner.write().await;
     let before = inner.peers.len();
     inner
         .peers
-        .retain(|p| !(p.name == q.name && p.fingerprint == fp));
+        .retain(|p| p.name != q.name || !may_manage(&caller, p, &fp));
     let removed = before - inner.peers.len();
     drop(inner);
     app.persist().await;
     if removed == 0 {
+        // Registered but not manageable by this identity: report the same
+        // "not yours" outcome without distinguishing it from unknown names.
         return err(
             StatusCode::NOT_FOUND,
             "no such peer registered by this identity",
@@ -248,42 +252,24 @@ pub async fn update(
         }
     }
 
+    // Resolve the token to an identity BEFORE taking the write lock (the
+    // resolver acquires its own read lock) and BEFORE the name lookup: a token
+    // that is neither shared nor any peer's caller_token must 401 without
+    // disclosing whether the name exists (pending/revoked peers are unlisted
+    // by design).
+    let caller = match resolve_caller(&app, &token).await {
+        Some(c) => c,
+        None => return unauthorized(),
+    };
     let fp = fingerprint(&token);
     let mut inner = app.inner.write().await;
-    // Resolve the token to an identity BEFORE the name lookup: a token that is
-    // neither shared nor any peer's caller_token must 401 without disclosing
-    // whether the name exists (pending/revoked peers are unlisted by design).
-    let shared = {
-        let (gateway, bootstrap) = (inner.gateway_token.clone(), inner.bootstrap_token.clone());
-        classify_token(&token, &gateway, &bootstrap).is_some()
-    };
-    let owner = if shared {
-        None
-    } else {
-        inner
-            .peers
-            .iter()
-            .find(|p| {
-                p.caller_token
-                    .as_deref()
-                    .is_some_and(|ct| crate::auth::ct_eq(ct, &token))
-            })
-            .map(|p| p.name.clone())
-    };
-    if !shared && owner.is_none() {
-        return unauthorized();
-    }
     let Some(idx) = inner.peers.iter().position(|x| x.name == name) else {
         return err(StatusCode::NOT_FOUND, "no such peer");
     };
-    // Authorization: shared token must match the registrant fingerprint; a
-    // caller token must be this peer's own.
-    let authorized = if shared {
-        inner.peers[idx].fingerprint == fp
-    } else {
-        owner.as_deref() == Some(name.as_str())
-    };
-    if !authorized {
+    // Authorization: the peer's own caller token, or (legacy entries without
+    // one only) the exact shared token that registered them. Any other shared
+    // token is a different fleet identity → 409 (issue #3).
+    if !may_manage(&caller, &inner.peers[idx], &fp) {
         return err(StatusCode::CONFLICT, "peer registered by another identity");
     }
     if inner.peers[idx].state == PeerState::Revoked {
@@ -361,6 +347,43 @@ async fn peer_from_token(app: &AppState, token: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Who a presented token resolves to.
+pub enum Caller {
+    /// A shared operator token (gateway/bootstrap) — fleet-wide, identifies
+    /// NO individual peer.
+    Shared(TokenKind),
+    /// A specific peer's per-peer caller token.
+    Peer(String),
+}
+
+/// Resolve a bearer token to a caller identity: shared operator tokens
+/// (gateway/bootstrap) first, then per-peer caller tokens (constant-time).
+/// None = unknown token.
+pub async fn resolve_caller(app: &AppState, token: &str) -> Option<Caller> {
+    let (gateway, bootstrap) = {
+        let inner = app.inner.read().await;
+        (inner.gateway_token.clone(), inner.bootstrap_token.clone())
+    };
+    if let Some(kind) = classify_token(token, &gateway, &bootstrap) {
+        return Some(Caller::Shared(kind));
+    }
+    peer_from_token(app, token).await.map(Caller::Peer)
+}
+
+/// May this caller manage the peer (PATCH / DELETE / channel-open /
+/// re-register)? Once a peer holds a per-peer caller token, that token is
+/// the ONLY management credential: shared operator tokens are restricted to
+/// legacy entries registered before caller tokens existed (and then only the
+/// exact shared token that registered them). Without this restriction every
+/// shared-token holder could act as any peer — the cross-peer takeover of
+/// issue #3.
+pub fn may_manage(caller: &Caller, peer: &Peer, fp: &str) -> bool {
+    match caller {
+        Caller::Peer(owner) => owner == &peer.name,
+        Caller::Shared(_) => peer.caller_token.is_none() && peer.fingerprint == fp,
+    }
 }
 
 /// Channel-path variant: per-peer token → name (no prefix); else header; else
