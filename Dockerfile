@@ -21,10 +21,10 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
- RUN useradd --system --uid 1000 --user-group switchboard
- COPY --from=build /src/target/release/a2a-switchboard /usr/local/bin/a2a-switchboard
- 
- VOLUME ["/data"]
+RUN useradd --system --uid 1000 --user-group switchboard
+COPY --from=build /src/target/release/a2a-switchboard /usr/local/bin/a2a-switchboard
+
+VOLUME ["/data"]
  ENV AGW_DATA_DIR=/data
  USER switchboard
  EXPOSE 9920
