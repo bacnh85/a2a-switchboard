@@ -869,12 +869,12 @@ async fn admin_password_first_set_from_container_bridge_ip() {
 
     // Simulate the takeover attempt from an arbitrary private/public IP:
     // POST /settings/password without the current password must NOT set one.
-    for src in ([
+    for src in [
         [10, 88, 0, 35],
         [172, 17, 0, 3],
         [8, 8, 8, 8],
         [192, 168, 1, 50],
-    ]) {
+    ] {
         let r = router
             .clone()
             .oneshot(form_req_from(
@@ -2185,7 +2185,7 @@ async fn routing_log_rotation_and_perm() {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "routing.jsonl must be 0600");
-        let mode = std::fs::metadata(&dir.join("state.json"))
+        let mode = std::fs::metadata(dir.join("state.json"))
             .unwrap()
             .permissions()
             .mode()
