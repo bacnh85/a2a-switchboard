@@ -7,17 +7,31 @@ binary, TLS, firewalls, systemd, and backups.
 
 ```bash
 docker pull ghcr.io/bacnh85/a2a-switchboard:latest
+mkdir -p data && sudo chown 1000:1000 data   # container runs as UID 1000
 docker run -d --name switchboard \
-  -p 9920:9920 \
+  -e AGW_BIND=0.0.0.0:9920 \
+  -p 127.0.0.1:9920:9920 \
   -v ./data:/data \
   ghcr.io/bacnh85/a2a-switchboard:latest
+docker logs switchboard   # first start prints the admin UI password
 ```
+
+The loopback publish keeps the gateway off the LAN by default. To accept
+peers from the LAN, publish on all interfaces (`-p 9920:9920`) and put a TLS
+terminator in front (see below).
 
 - The image contains only the binary + CA certificates (~20MB). Templates,
   CSS, and JS are compiled into the binary (rust-embed) — nothing else to mount.
 - State lives in `/data` (`state.json` = peers + tokens, `routing.jsonl` =
   append-only routing log). Mount a persistent volume.
 - Healthcheck: the compose file uses a TCP probe on 9920.
+- The container runs as **UID 1000** (non-root). For bind mounts, ensure the
+  host directory is writable by that uid: `mkdir -p data && sudo chown 1000:1000 data`.
+  Upgrading from ≤0.5? `sudo chown -R 1000:1000 /path/to/data` first, or the
+  gateway cannot write its state.
+- On first start the admin UI password is generated and printed to the logs
+  (`docker logs switchboard` / `journalctl -u switchboard`). Change it in
+  Settings → Admin access.
 
 ### docker-compose
 
@@ -43,7 +57,10 @@ First run prints the gateway token and bootstrap token. They're also in
 |---|---|---|---|
 | `server.bind` | `AGW_BIND` | `127.0.0.1:9920` | Listen address |
 | `server.data_dir` | `AGW_DATA_DIR` | `data/` | State + routing log directory |
-| `server.heartbeat_sec` | `AGW_HEARTBEAT_SEC` | `30` | Peer health probe interval |
+ | `server.heartbeat_sec` | `AGW_HEARTBEAT_SEC` | `30` | Peer health probe interval |
+ | `server.cookie_secure` | `AGW_COOKIE_SECURE` | `false` | Mark session cookies `Secure` (TLS terminator in front) |
+ | `server.routing_log_max_mb` | `AGW_ROUTING_LOG_MAX_MB` | `64` | `routing.jsonl` size cap before rotating to `.1` (0 = no file log) |
+ | `server.audit_previews` | `AGW_AUDIT_PREVIEWS` | `true` | Keep redacted request previews in the audit log |
 
 Optional `config.toml` in the working directory (see `config.toml.example`).
 Env vars override config file; defaults fill the rest.
@@ -51,8 +68,9 @@ Env vars override config file; defaults fill the rest.
 ## TLS termination
 
 The switchboard speaks plain HTTP by design (self-hosted; TLS is a
-terminator's job). Admin UI is **unauthenticated** — you should put TLS + auth
-in front of it for remote access.
+terminator's job). The admin UI requires its password (generated at first
+run, printed to the logs), but bearer tokens still transit the wire in
+cleartext — put a TLS terminator in front for remote access.
 
 ### Caddy
 
@@ -75,10 +93,11 @@ server {
 }
 ```
 
-> **Security warning**: if `AGW_BIND` is widened beyond `127.0.0.1`, the admin
-> UI is exposed without authentication. The UI shows a warning banner in this
-> state. Restrict at the network/firewall layer or put an authenticating proxy
-> in front.
+> **Security warning**: if `AGW_BIND` is widened beyond `127.0.0.1`, bearer
+> tokens transit plaintext HTTP. The gateway logs a warning at startup.
+> Prefer a loopback bind behind a TLS terminator; set `AGW_COOKIE_SECURE=1`
+> so session cookies get the `Secure` flag. The compose file publishes
+> `127.0.0.1:9920:9920` by default for this reason.
 
 ## Firewall rules
 

@@ -235,27 +235,30 @@ pub fn audit_extract(body: &[u8]) -> AuditInfo {
 
 #[derive(Default)]
 pub struct RateLimiter {
-    // ip -> (window_start_unix, count)
-    hits: Mutex<HashMap<String, (u64, u32)>>,
+    // key -> accepted request timestamps (unix secs), ascending.
+    // Rolling window (issue #5): no 2x boundary burst like the fixed window.
+    hits: Mutex<HashMap<String, VecDeque<i64>>>,
 }
 
 impl RateLimiter {
-    /// Fixed window: max requests per 60s sliding window bucket.
+    /// Rolling window: at most `max` accepted requests in the last 60s.
     pub fn allow(&self, key: &str, max: u32) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now: i64 = now();
+        let cutoff = now - 60;
         let mut hits = self.hits.lock().unwrap();
         if hits.len() > 10_000 {
-            hits.retain(|_, (w, _)| now - *w < 60);
+            // cheap cleanup: drop keys with no recent accepted request
+            hits.retain(|_, v| v.back().is_some_and(|t| *t >= cutoff));
         }
-        let e = hits.entry(key.to_string()).or_insert((now, 0));
-        if now - e.0 >= 60 {
-            *e = (now, 0);
+        let q = hits.entry(key.to_string()).or_default();
+        while q.front().is_some_and(|t| *t < cutoff) {
+            q.pop_front();
         }
-        e.1 += 1;
-        e.1 <= max
+        let allowed = q.len() < max as usize;
+        if allowed {
+            q.push_back(now);
+        }
+        allowed
     }
 }
 
@@ -267,13 +270,52 @@ pub struct Inner {
     pub admin: Option<AdminCred>,
 }
 
-/// Salted hash of the admin dashboard password.
-// ponytail: sha256+salt+ct_eq, not argon2 — state.json already stores plaintext
-// gateway/bootstrap tokens; upgrade if those are ever hashed at rest.
+/// Admin password credential. `hash` is argon2id (PHC string) for new
+/// passwords; legacy entries (single-iteration salted SHA-256, pre-0.6.0)
+/// carry `hash` = "sha256$<hex>" and are transparently upgraded to argon2id
+/// on the next successful login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminCred {
     pub salt: String,
     pub hash: String,
+}
+
+impl AdminCred {
+    /// argon2id hash, PHC-string encoded.
+    pub fn hash_pw(pw: &str) -> AdminCred {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
+        let salt = SaltString::generate(&mut OsRng);
+        let params = Params::new(19456, 2, 1, None).expect("valid argon2 params");
+        let a2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let hash = a2
+            .hash_password(pw.as_bytes(), &salt)
+            .expect("argon2 hash")
+            .to_string();
+        AdminCred {
+            salt: String::new(), // argon2 PHC string carries its own salt
+            hash,
+        }
+    }
+
+    /// Verify against argon2id or the legacy sha256 format.
+    fn verify(&self, pw: &str) -> bool {
+        if let Some(legacy) = self.hash.strip_prefix("sha256$") {
+            return crate::auth::ct_eq(&hash_pw_legacy(&self.salt, pw), legacy);
+        }
+        use argon2::PasswordVerifier;
+        let Ok(parsed) = argon2::PasswordHash::new(&self.hash) else {
+            return false;
+        };
+        argon2::Argon2::default()
+            .verify_password(pw.as_bytes(), &parsed)
+            .is_ok()
+    }
+
+    /// True when this credential still uses the legacy single-iteration hash.
+    fn is_legacy(&self) -> bool {
+        self.hash.starts_with("sha256$")
+    }
 }
 
 pub const SESSION_TTL: i64 = 12 * 3600;
@@ -289,6 +331,27 @@ pub struct App {
     pub channels: crate::channel::Channels,
     /// Admin UI sessions: token -> expires_unix. In-memory; restart logs out.
     pub sessions: Mutex<HashMap<String, i64>>,
+}
+
+/// routing.jsonl size cap before rotation (bytes). 0 disables the file log.
+/// Set once from config at startup (issue #5).
+pub static ROUTING_LOG_MAX_BYTES: std::sync::RwLock<u64> = std::sync::RwLock::new(64 * 1024 * 1024);
+
+/// When false, audit previews (redacted param snapshots) are dropped from
+/// the routing log — free-text parts can carry secrets key-name redaction
+/// cannot see. Set once from config at startup (issue #5).
+pub static PREVIEW_ENABLED: std::sync::RwLock<bool> = std::sync::RwLock::new(true);
+
+/// chmod 0600 on unix (no-op elsewhere) — state.json/routing.jsonl hold
+/// cleartext tokens and audit data.
+fn restrict_perms(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 pub type AppState = Arc<App>;
@@ -367,8 +430,8 @@ impl App {
             // Never follow redirects: keeps egress pinned to the registered URL (SSRF guard).
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        Ok(Self {
-            data_dir,
+        let app = Self {
+            data_dir: data_dir.clone(),
             inner: RwLock::new(inner),
             log_ring: RwLock::new(VecDeque::with_capacity(RING_CAP)),
             log_tx,
@@ -376,10 +439,21 @@ impl App {
             http,
             channels: crate::channel::Channels::new(),
             sessions: Mutex::new(HashMap::new()),
-        })
+        };
+        // Tighten an existing state.json/routing.jsonl left world-readable by
+        // an older build (issue #5).
+        for name in ["state.json", "routing.jsonl"] {
+            let p = data_dir.join(name);
+            if p.exists() {
+                restrict_perms(&p);
+            }
+        }
+        Ok(app)
     }
 
     /// Atomic persist: tmp file + rename, so a crash never truncates state.json.
+    /// The tmp file is created 0600 — state.json carries every token in
+    /// cleartext and must never be world-readable (issue #5).
     pub async fn persist(&self) {
         let inner = self.inner.read().await;
         let p = Persisted {
@@ -392,23 +466,52 @@ impl App {
         if let Ok(json) = serde_json::to_string_pretty(&p) {
             let tmp = self.data_dir.join("state.json.tmp");
             let dst = self.data_dir.join("state.json");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, &dst);
+            let mut ok = std::fs::write(&tmp, json).is_ok();
+            if ok {
+                restrict_perms(&tmp);
+                ok = std::fs::rename(&tmp, &dst).is_ok();
+            }
+            if ok {
+                restrict_perms(&dst);
             }
         }
     }
 
+    /// Size-capped append to routing.jsonl (issue #5): when the file exceeds
+    /// `max_bytes`, rotate it to routing.jsonl.1 (previous .1 dropped) before
+    /// appending. `max_bytes == 0` disables the file log entirely (ring + SSE
+    /// still work; admin audit pages show only the in-memory ring).
+    fn append_routing_log(&self, line: &str) {
+        use std::io::Write;
+        let path = self.data_dir.join("routing.jsonl");
+        let cap = *ROUTING_LOG_MAX_BYTES.read().unwrap();
+        if cap == 0 {
+            return;
+        }
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() + line.len() as u64 > cap {
+                let _ = std::fs::rename(&path, self.data_dir.join("routing.jsonl.1"));
+            }
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+        restrict_perms(&path);
+    }
+
     pub async fn log_route(&self, e: RouteEntry) {
+        let preview_enabled = *PREVIEW_ENABLED.read().unwrap();
+        let mut e = e;
+        if !preview_enabled {
+            e.preview = None;
+        }
         if let Ok(mut json) = serde_json::to_string(&e) {
             json.push('\n');
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(self.data_dir.join("routing.jsonl"))
-            {
-                let _ = f.write_all(json.as_bytes());
-            }
+            self.append_routing_log(&json);
         }
         let mut ring = self.log_ring.write().await;
         if ring.len() >= RING_CAP {
@@ -430,7 +533,19 @@ impl App {
         t
     }
 
+    /// Ensure an admin password exists (issue #4): returns Some(plaintext)
+    /// when a random password was just generated — main() logs it once; the
+    /// cleartext is never stored. None = a password was already set.
+    pub async fn ensure_admin_password(&self) -> Option<String> {
+        if self.admin_set().await {
+            return None;
+        }
+        let pw = gen_admin_password();
+        self.set_admin_password(None, &pw).await.ok().map(|_| pw)
+    }
+
     /// Set or change the admin password. When one exists, `current` must match.
+    /// Legacy sha256 credentials are transparently upgraded on successful auth.
     pub async fn set_admin_password(
         &self,
         current: Option<&str>,
@@ -440,29 +555,47 @@ impl App {
             let mut inner = self.inner.write().await;
             if let Some(cred) = &inner.admin {
                 let cur = current.ok_or("current password required")?;
-                if hash_pw(&cred.salt, cur) != cred.hash {
+                if !cred.verify(cur) {
                     return Err("current password is incorrect");
                 }
             }
             if new.len() < 8 {
                 return Err("new password must be at least 8 characters");
             }
-            let salt = gen_token();
-            inner.admin = Some(AdminCred {
-                hash: hash_pw(&salt, new),
-                salt,
-            });
+            inner.admin = Some(AdminCred::hash_pw(new));
         }
         self.persist().await;
         Ok(())
     }
 
+    /// Verify a login attempt. Returns true on success; when the stored
+    /// credential is the legacy sha256 format and the password is correct,
+    /// it is transparently re-hashed with argon2id.
     pub async fn verify_admin_password(&self, pw: &str) -> bool {
-        let inner = self.inner.read().await;
-        match &inner.admin {
-            Some(c) => crate::auth::ct_eq(&hash_pw(&c.salt, pw), &c.hash),
-            None => false,
+        let mut upgrade_salt = None;
+        let ok = {
+            let inner = self.inner.read().await;
+            match &inner.admin {
+                Some(c) => {
+                    let ok = c.verify(pw);
+                    if ok && c.is_legacy() {
+                        upgrade_salt = Some(c.hash.clone()); // any marker; upgrade below
+                    }
+                    ok
+                }
+                None => false,
+            }
+        };
+        if ok && upgrade_salt.is_some() {
+            // Re-hash with argon2id on first successful login.
+            let mut inner = self.inner.write().await;
+            if let Some(_c) = &inner.admin {
+                inner.admin = Some(AdminCred::hash_pw(pw));
+                drop(inner);
+                self.persist().await;
+            }
         }
+        ok
     }
 
     pub async fn admin_set(&self) -> bool {
@@ -488,11 +621,27 @@ impl App {
     }
 }
 
-fn hash_pw(salt: &str, pw: &str) -> String {
+fn hash_pw_legacy(salt: &str, pw: &str) -> String {
     let mut h = Sha256::new();
     h.update(salt.as_bytes());
     h.update(pw.as_bytes());
     hex(&h.finalize())
+}
+
+/// Generate a readable random admin password: 4 groups of 4 lowercase
+/// letters/digits, hyphen-separated (no ambiguous chars, ~64 bits).
+pub fn gen_admin_password() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+    let mut rng = rand::rng();
+    (0..4)
+        .map(|_| {
+            (0..4)
+                .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Validate a peer-declared URL: http(s) only, has host. Deny-by-default egress starts here.

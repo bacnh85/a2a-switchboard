@@ -2,6 +2,8 @@ use crate::state::{now, AppState, Peer, PeerState, RouteEntry};
 
 // set in main() — controls the non-localhost warning banner
 pub static LOCALHOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+// set in main() — adds `Secure` to session cookies when TLS fronts the gateway
+pub static COOKIE_SECURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn is_localhost() -> bool {
     LOCALHOST.load(std::sync::atomic::Ordering::Relaxed)
@@ -90,7 +92,6 @@ pub struct SettingsTmpl {
     pub active_nav: &'static str,
     pub localhost: bool,
     pub authed: bool,
-    pub password_set: bool,
     pub pw: String,
     pub gateway_token: String,
     pub bootstrap_token: String,
@@ -381,7 +382,6 @@ pub async fn settings_page(
         active_nav: "settings",
         localhost: is_localhost(),
         authed: app.admin_set().await,
-        password_set: inner.admin.is_some(),
         pw: q.get("pw").cloned().unwrap_or_default(),
         gateway_token: inner.gateway_token.clone(),
         bootstrap_token: inner.bootstrap_token.clone(),
@@ -397,37 +397,14 @@ pub struct PasswordForm {
     pub confirm: String,
 }
 
-/// Is the source IP a local/private address? Gates the first-time admin
-/// password set. Behind podman/docker port publishing the socket source IP is
-/// the container-bridge gateway (e.g. 10.88.0.35), never 127.0.0.1 — so treat
-/// loopback plus the RFC1918 private ranges (10/8, 172.16/12, 192.168/16,
-/// which cover podman's 10.88/16 and docker's 172.17/16 bridges) as local.
-fn is_local_source(ip: &str) -> bool {
-    let Ok(ip) = ip.parse::<std::net::IpAddr>() else {
-        return false;
-    };
-    let v4 = match ip {
-        std::net::IpAddr::V4(v4) => Some(v4),
-        // Unmap IPv4-mapped IPv6 (::ffff:a.b.c.d) — podman may present the
-        // peer as a mapped address even for IPv4 bridges.
-        std::net::IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .or_else(|| v6.is_loopback().then_some(std::net::Ipv4Addr::LOCALHOST)),
-    };
-    v4.map(|v4| v4.is_loopback() || v4.is_private())
-        .unwrap_or(false)
-}
-
-/// Set (first time, local/private source only) or change the admin password.
-pub async fn set_password(
-    State(app): State<AppState>,
-    crate::auth::ClientIp(ip): crate::auth::ClientIp,
-    Form(f): Form<PasswordForm>,
-) -> Response {
-    let localhost = is_local_source(&ip);
-    let is_change = app.admin_set().await;
-    if !is_change && !localhost {
-        return Redirect::to("/settings").into_response();
+/// Set or change the admin password. The first-time set-from-LAN path is
+/// gone (issue #4): a random password is generated on first run; changing
+/// it always requires the current password.
+pub async fn set_password(State(app): State<AppState>, Form(f): Form<PasswordForm>) -> Response {
+    // There is no first-set-over-HTTP path (issue #4): the initial password
+    // is minted at startup and logged once. Before that exists, refuse.
+    if !app.admin_set().await {
+        return Redirect::to("/settings?pw=error").into_response();
     }
     if f.new != f.confirm {
         return Redirect::to("/settings?pw=mismatch").into_response();
@@ -550,31 +527,4 @@ pub async fn sse_events(
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_local_source;
-
-    #[test]
-    fn local_source_detection() {
-        // loopback v4/v6 + IPv4-mapped loopback
-        assert!(is_local_source("127.0.0.1"));
-        assert!(is_local_source("127.8.9.10"));
-        assert!(is_local_source("::1"));
-        assert!(is_local_source("::ffff:127.0.0.1"));
-        // podman/docker bridge sources
-        assert!(is_local_source("10.88.0.35"));
-        assert!(is_local_source("10.0.0.1"));
-        assert!(is_local_source("172.17.0.1"));
-        assert!(is_local_source("172.31.255.254"));
-        assert!(is_local_source("192.168.1.42"));
-        assert!(is_local_source("::ffff:10.88.0.35"));
-        // public / non-local sources must NOT pass the gate
-        assert!(!is_local_source("8.8.8.8"));
-        assert!(!is_local_source("172.32.0.1"));
-        assert!(!is_local_source("192.169.0.1"));
-        assert!(!is_local_source("2001:db8::1"));
-        assert!(!is_local_source("not-an-ip"));
-    }
 }

@@ -430,28 +430,44 @@ async fn caller_display(
     }
 }
 
-/// GET /.well-known/agent.json (+ v1.0 alias) — gateway card + accepted-peer directory.
-/// Auth-aware: capabilities/skills only shown to token holders; pending/revoked never listed.
-pub async fn agent_card(State(app): State<AppState>, headers: HeaderMap) -> Response {
+/// GET /.well-known/agent.json (+ v1.0 alias) — gateway card + accepted-peer
+/// directory. Any valid token (gateway, bootstrap, or a peer caller_token)
+/// sees the full directory; unauthenticated callers get the gateway card only
+/// (issue #5 — no fleet names/health/channel disclosure without a token).
+pub async fn agent_card(
+    State(app): State<AppState>,
+    crate::auth::ClientIp(ip): crate::auth::ClientIp,
+    headers: HeaderMap,
+) -> Response {
+    // Rate-limited like every other peer-facing endpoint (issue #5).
+    if !app.limiter.allow(&ip, 120) {
+        return too_many();
+    }
     let inner = app.inner.read().await;
     let token = extract_token(&headers);
-    let authed = token
-        .as_deref()
-        .and_then(|t| classify_token(t, &inner.gateway_token, &inner.bootstrap_token))
-        .is_some();
+    let (gateway, bootstrap) = (inner.gateway_token.clone(), inner.bootstrap_token.clone());
+    drop(inner);
+    let authed = match token.as_deref() {
+        Some(t) => authorized_token(&app, t, &gateway, &bootstrap).await,
+        None => false,
+    };
 
-    let peers: Vec<serde_json::Value> = inner
-        .peers
-        .iter()
-        .filter(|p| p.state == PeerState::Accepted)
-        .map(|p| {
-            let mut v = serde_json::json!({
-                "name": p.name,
-                "url": format!("/peer/{}/", p.name),
-                "healthy": p.healthy,
-                "channel": app.channels.has(&p.name),
-            });
-            if authed {
+    let inner = app.inner.read().await;
+    // The fleet directory is the sensitive part (names/health/channel are
+    // admission state); unauthenticated callers get an empty list (issue #5).
+    let mut peers: Vec<serde_json::Value> = Vec::new();
+    if authed {
+        peers = inner
+            .peers
+            .iter()
+            .filter(|p| p.state == PeerState::Accepted)
+            .map(|p| {
+                let mut v = serde_json::json!({
+                    "name": p.name,
+                    "url": format!("/peer/{}/", p.name),
+                    "healthy": p.healthy,
+                    "channel": app.channels.has(&p.name),
+                });
                 v["capabilities"] = p
                     .card
                     .get("capabilities")
@@ -462,10 +478,10 @@ pub async fn agent_card(State(app): State<AppState>, headers: HeaderMap) -> Resp
                     .get("skills")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-            }
-            v
-        })
-        .collect();
+                v
+            })
+            .collect();
+    }
 
     Json(serde_json::json!({
         "name": "a2a-switchboard",

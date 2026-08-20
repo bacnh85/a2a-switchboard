@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] - 2026-08-19
+
+### Security (fixes #4, #5)
+
+- **No unauthenticated admin window (issue #4)**: the first-run admin
+  password is generated at startup and logged once (same pattern as the
+  tokens); the setup form, its RFC1918 "local" gate, and the associated
+  takeover vector are gone. Changing the password always requires the
+  current one.
+- **argon2id password hashing (issue #5)**: legacy single-iteration SHA-256
+  credentials are transparently upgraded on first successful login.
+- **State files are 0600** (`state.json`, `routing.jsonl`) — tokens and
+  audit data are no longer world-readable.
+- **Directory gated (issue #5)**: `/.well-known/agent.json` requires a
+  valid token (gateway, bootstrap, or peer `caller_token`) to list peers;
+  unauthenticated callers get the gateway card with an empty `peers` array.
+- **CSRF Origin check on admin POSTs** (issue #5) — mismatched `Origin`
+  headers are rejected.
+- **Rolling-window rate limiter (issue #5)** — no fixed-window boundary
+  burst; `agent.json` is now throttled.
+- **Routing log rotation (issue #5)**: size-capped
+  (`AGW_ROUTING_LOG_MAX_MB`, default 64 MiB) with rotation to `.1`;
+  previews can be disabled (`AGW_AUDIT_PREVIEWS=false`).
+- **Session cookies**: optional `Secure` flag via `AGW_COOKIE_SECURE`
+  for TLS-terminated deployments.
+- **Docker runs as a non-root user** (UID 1000); compose publishes on
+  loopback by default.
+
+### Changed
+
+- `App::load`/`Config` gained the `cookie_secure`, `routing_log_max_mb`,
+  and `audit_previews` settings (config.toml or env).
+
 ## [0.5.0] - 2026-08-17
 
 ### Added

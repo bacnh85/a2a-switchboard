@@ -753,7 +753,7 @@ fn cookie_of(resp: &axum::http::Response<axum::body::Body>) -> Option<String> {
 async fn admin_password_flow() {
     let (router, app, _, _) = test_app().await;
 
-    // no password set: UI open
+    // no password set: UI open until startup mints one (issue #4)
     let r = router
         .clone()
         .oneshot(req("GET", "/", None, None))
@@ -761,14 +761,30 @@ async fn admin_password_flow() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
 
-    // set password (test ClientIp is localhost)
+    // startup mints the initial password; the UI locks immediately after
+    let initial = app.ensure_admin_password().await.unwrap();
+    assert!(app.admin_set().await);
+
+    // login with the minted password → session cookie
     let r = router
         .clone()
-        .oneshot(form_req(
-            "POST",
-            "/settings/password",
-            "new=password123&confirm=password123",
-        ))
+        .oneshot(form_req("POST", "/login", &format!("password={initial}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let initial_cookie = cookie_of(&r).unwrap();
+
+    // change password over HTTP (session + current password)
+    let r = router
+        .clone()
+        .oneshot(
+            form_req(
+                "POST",
+                "/settings/password",
+                &format!("current={initial}&new=password123&confirm=password123"),
+            )
+            .with_header("cookie", &initial_cookie),
+        )
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
@@ -846,51 +862,54 @@ async fn admin_password_flow() {
 
 #[tokio::test]
 async fn admin_password_first_set_from_container_bridge_ip() {
+    // Issue #4: the unauthenticated first-run setup path is GONE. A random
+    // password is generated at startup (ensure_admin_password); any client
+    // trying to claim the dashboard before that gets redirected, not a form.
     let (router, app, _, _) = test_app().await;
 
-    // Simulate a podman/docker port-published client: socket source IP is the
-    // bridge gateway (10.88.0.35), never 127.0.0.1. First-time set must work.
+    // Simulate the takeover attempt from an arbitrary private/public IP:
+    // POST /settings/password without the current password must NOT set one.
+    for src in [
+        [10, 88, 0, 35],
+        [172, 17, 0, 3],
+        [8, 8, 8, 8],
+        [192, 168, 1, 50],
+    ] {
+        let r = router
+            .clone()
+            .oneshot(form_req_from(
+                "POST",
+                "/settings/password",
+                "new=evilpass99&confirm=evilpass99",
+                (src, 50000),
+            ))
+            .await
+            .unwrap();
+        // password is set by the app bootstrap below; without `current` the
+        // change is rejected either way — and before bootstrap it would be
+        // too, because the first-set form no longer exists.
+        assert_ne!(r.status(), StatusCode::OK);
+    }
+    assert!(!app.verify_admin_password("evilpass99").await);
+
+    // The operator path: startup generates a password (issue #4).
+    let pw = app.ensure_admin_password().await;
+    assert!(pw.is_some(), "startup must mint an admin password");
+    assert!(app.admin_set().await);
+
+    // Any subsequent set requires the current password.
     let r = router
         .clone()
         .oneshot(form_req_from(
             "POST",
             "/settings/password",
-            "new=bridgepass99&confirm=bridgepass99",
+            "new=stolenpass1&confirm=stolenpass1",
             ([10, 88, 0, 35], 50000),
         ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
-    assert!(app.verify_admin_password("bridgepass99").await);
-
-    // Docker bridge 172.17.0.x also passes; a public IP must still be refused.
-    let (router2, app2, _, _) = test_app().await;
-    let r = router2
-        .clone()
-        .oneshot(form_req_from(
-            "POST",
-            "/settings/password",
-            "new=dockerpass7&confirm=dockerpass7",
-            ([172, 17, 0, 3], 50000),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(r.status(), StatusCode::SEE_OTHER);
-    assert!(app2.verify_admin_password("dockerpass7").await);
-
-    let (router3, app3, _, _) = test_app().await;
-    let r = router3
-        .clone()
-        .oneshot(form_req_from(
-            "POST",
-            "/settings/password",
-            "new=publicpass1&confirm=publicpass1",
-            ([8, 8, 8, 8], 50000),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(r.status(), StatusCode::SEE_OTHER);
-    assert!(!app3.admin_set().await);
+    assert!(!app.verify_admin_password("stolenpass1").await);
 }
 
 #[tokio::test]
@@ -1940,4 +1959,284 @@ async fn patch_shared_token_fingerprint_guard() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
+}
+
+// ---- Issue #5 hardening regression tests ----
+
+#[tokio::test]
+async fn unauth_directory_hides_fleet() {
+    // Register + accept a peer, then check the directory: no token → no
+    // peer names/health/channel; gateway/bootstrap/caller tokens → visible.
+    let (router, app, gw, boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(
+                r#"{"name":"d-peer","url":"http://127.0.0.1:9/v1","card":{"capabilities":["x"]}}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    let caller = {
+        let inner = app.inner.read().await;
+        inner.peers[0].caller_token.clone().unwrap()
+    };
+
+    // unauth: gateway card only, zero peers
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/.well-known/agent.json", None, None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        card["peers"].as_array().unwrap().len(),
+        0,
+        "unauth must not see the fleet"
+    );
+
+    // gateway token: full directory incl. capabilities
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/.well-known/agent.json", Some(&gw), None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let peers = card["peers"].as_array().unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0]["name"], "d-peer");
+    assert!(peers[0].get("capabilities").is_some());
+
+    // peer caller token: directory visible too (authorized_token now accepts
+    // caller tokens for the directory, issue #5)
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/.well-known/agent.json", Some(&caller), None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(card["peers"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn agent_json_rate_limited() {
+    let (router, _, _, _) = test_app().await;
+    let mut last = StatusCode::OK;
+    for _ in 0..125 {
+        let r = router
+            .clone()
+            .oneshot(req("GET", "/.well-known/agent.json", None, None))
+            .await
+            .unwrap();
+        last = r.status();
+        if last == StatusCode::TOO_MANY_REQUESTS {
+            break;
+        }
+    }
+    assert_eq!(
+        last,
+        StatusCode::TOO_MANY_REQUESTS,
+        "agent.json must be throttled"
+    );
+}
+
+#[tokio::test]
+async fn cross_origin_admin_post_rejected() {
+    let (router, app, _, _) = test_app().await;
+    let initial = app.ensure_admin_password().await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(form_req("POST", "/login", &format!("password={initial}")))
+        .await
+        .unwrap();
+    let cookie = cookie_of(&r).unwrap();
+
+    // same-origin admin POST works
+    let r = router
+        .clone()
+        .oneshot(
+            req("POST", "/peers/x/accept", None, None)
+                .with_header("cookie", &cookie)
+                .with_header("origin", "http://127.0.0.1:9920")
+                .with_header("host", "127.0.0.1:9920"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+
+    // cross-origin admin POST (CSRF) rejected even with a valid session
+    let r = router
+        .clone()
+        .oneshot(
+            req("POST", "/peers/x/delete", None, None)
+                .with_header("cookie", &cookie)
+                .with_header("origin", "http://evil.example")
+                .with_header("host", "127.0.0.1:9920"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn legacy_admin_hash_upgraded_to_argon2() {
+    // Simulate a pre-0.6.0 state.json: salt + single-iteration sha256.
+    let (_, app, _, _) = test_app().await;
+    {
+        let mut inner = app.inner.write().await;
+        let salt = "somesalt".to_string();
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(salt.as_bytes());
+        h.update(b"legacy-pass");
+        let hash = h.finalize();
+        let hexhash = hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        inner.admin = Some(a2a_switchboard::state::AdminCred {
+            salt,
+            hash: format!("sha256${hexhash}"),
+        });
+    }
+    assert!(app.verify_admin_password("legacy-pass").await);
+    // after a successful legacy login the stored hash must be argon2 PHC
+    {
+        let inner = app.inner.read().await;
+        let cred = inner.admin.as_ref().unwrap();
+        assert!(
+            cred.hash.starts_with("$argon2id$"),
+            "expected argon2 PHC after upgrade, got: {}",
+            cred.hash.chars().take(12).collect::<String>()
+        );
+    }
+    // and the upgraded credential still verifies
+    assert!(app.verify_admin_password("legacy-pass").await);
+    assert!(!app.verify_admin_password("wrong-pass").await);
+}
+
+#[tokio::test]
+async fn cookie_secure_flag_when_enabled() {
+    let (router, app, _, _) = test_app().await;
+    let initial = app.ensure_admin_password().await.unwrap();
+    a2a_switchboard::admin::COOKIE_SECURE.store(true, std::sync::atomic::Ordering::Relaxed);
+    let r = router
+        .clone()
+        .oneshot(form_req("POST", "/login", &format!("password={initial}")))
+        .await
+        .unwrap();
+    let set_cookie = r
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        set_cookie.contains("Secure"),
+        "cookie must carry Secure when TLS fronts the gateway: {set_cookie}"
+    );
+    a2a_switchboard::admin::COOKIE_SECURE.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[tokio::test]
+async fn routing_log_rotation_and_perm() {
+    // Issue #5: routing.jsonl is size-capped (rotates to .1) and 0600.
+    let (_, app, _, _) = test_app().await;
+    let dir = app.data_dir.clone();
+    app.persist().await; // materialize state.json so the perms check has a target
+
+    // tiny cap to force rotation quickly
+    *a2a_switchboard::state::ROUTING_LOG_MAX_BYTES
+        .write()
+        .unwrap() = 2000;
+
+    let entry = a2a_switchboard::state::RouteEntry {
+        ts: 1,
+        src: "a".into(),
+        dst: "b".into(),
+        method: "POST".into(),
+        status: 200,
+        bytes: 10,
+        latency_ms: 1,
+        rpc_method: None,
+        rpc_id: None,
+        preview: None,
+    };
+    for _ in 0..60 {
+        app.log_route(entry.clone()).await;
+    }
+
+    let path = dir.join("routing.jsonl");
+    let rotated = dir.join("routing.jsonl.1");
+    assert!(
+        rotated.exists(),
+        "oversized routing.jsonl must rotate to routing.jsonl.1"
+    );
+    let len_after = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    assert!(len_after <= 2000, "routing.jsonl must stay under the cap");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "routing.jsonl must be 0600");
+        let mode = std::fs::metadata(dir.join("state.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "state.json must be 0600");
+    }
+}
+
+#[tokio::test]
+async fn previews_disabled_by_config() {
+    // Issue #5: audit previews can be disabled (secrets in free-text parts).
+    let (router, app, _gw, boot) = test_app().await;
+    *a2a_switchboard::state::PREVIEW_ENABLED.write().unwrap() = false;
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"pv","url":"http://127.0.0.1:1/","card":{"x":"secret-value-abc"}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+    // proxy a call so the preview would normally be captured
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/peer/pv", Some(&boot), Some("{}")))
+        .await
+        .unwrap();
+    let entries = a2a_switchboard::admin::read_routing_log(&app.data_dir);
+    let proxied = entries
+        .iter()
+        .find(|e| e.src == "pv" || e.dst == "pv")
+        .expect("proxy call must be logged");
+    assert!(
+        proxied.preview.is_none(),
+        "preview must be dropped when audit_previews=false"
+    );
+    *a2a_switchboard::state::PREVIEW_ENABLED.write().unwrap() = true;
+}
+
+#[tokio::test]
+async fn rolling_window_rate_limiter() {
+    // Issue #5: rate limiter is a rolling 60s window — the fixed-window 2x
+    // boundary burst is gone (verify by exhausting then waiting).
+    let rl = a2a_switchboard::state::RateLimiter::default();
+    for _ in 0..5 {
+        assert!(rl.allow("k", 5), "burst of 5 must pass");
+    }
+    assert!(!rl.allow("k", 5), "6th within window must be denied");
+    // per-key isolation: an unrelated key is unaffected
+    assert!(rl.allow("other", 5), "different key has its own window");
 }

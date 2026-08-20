@@ -29,6 +29,13 @@ routing log/dashboard — works even from raw curl. Additionally, a caller may
 send `X-Gateway-Caller: <name>` (advisory, e.g. pi-a2a's `selfIdentity`); it
 is clamped to 64 chars and always stripped before forwarding.
 
+## 0. Directory (discovery)
+
+`GET /.well-known/agent.json` returns the gateway card. The accepted-peer
+directory inside it requires a valid token (gateway, bootstrap, or a peer
+`caller_token`) — unauthenticated callers get an empty `peers` array (issue
+#5). Peers therefore present their token on discovery calls too.
+
 ## 1. Register a peer
 
 ```
