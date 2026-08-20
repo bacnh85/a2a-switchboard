@@ -6,7 +6,9 @@
 {% if pw == "error" %}<div class="banner banner-warn" role="alert">Could not save password — check the current password and that the new one is at least 8 characters.</div>{% endif %}
 <section class="card">
   <h2>Admin access</h2>
-  {% if password_set %}
+  <!-- Issue #4: the admin password is minted at first run (printed in the
+       startup logs) and must be changed here. There is no unauthenticated
+       first-set form. -->
   <p>Change the password required to open this dashboard. Sessions expire after 12h or on restart.</p>
   <form method="post" action="/settings/password" class="pw-form">
     <label for="cur">Current password</label>
@@ -17,16 +19,6 @@
     <input id="conf" type="password" name="confirm" required minlength="8" autocomplete="new-password">
     <button class="btn btn-primary" type="submit">Change password</button>
   </form>
-  {% else %}
-  <p>Set a password to protect this dashboard. Until then the UI stays open. For safety, the password can only be set from a localhost connection.</p>
-  <form method="post" action="/settings/password" class="pw-form">
-    <label for="new">Password (min 8 chars)</label>
-    <input id="new" type="password" name="new" required minlength="8" autocomplete="new-password">
-    <label for="conf">Confirm password</label>
-    <input id="conf" type="password" name="confirm" required minlength="8" autocomplete="new-password">
-    <button class="btn btn-primary" type="submit">Set password</button>
-  </form>
-  {% endif %}
 </section>
 <section class="card">
   <h2>Gateway API token</h2>

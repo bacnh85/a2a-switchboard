@@ -3,3 +3,6 @@
 bind = "127.0.0.1:9920"   # widen ONLY behind a TLS terminator; admin UI is unauthenticated
 data_dir = "data"
 heartbeat_sec = 30        # peer health probe interval
+# routing_log_max_mb = 64  # routing.jsonl size cap before rotation (0 disables the file log)
+# audit_previews = true    # false → drop redacted param previews from the audit log
+# cookie_secure = false    # true when a TLS terminator fronts the gateway

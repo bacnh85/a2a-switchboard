@@ -77,10 +77,15 @@ pub fn session_token(headers: &HeaderMap) -> Option<String> {
 pub fn session_response(resp: impl IntoResponse, token: String) -> Response {
     let resp = resp.into_response();
     let (mut parts, body) = resp.into_parts();
+    let secure = if crate::admin::COOKIE_SECURE.load(std::sync::atomic::Ordering::Relaxed) {
+        " Secure;"
+    } else {
+        ""
+    };
     parts.headers.insert(
         header::SET_COOKIE,
         format!(
-            "{COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+            "{COOKIE}={token}; HttpOnly; SameSite=Lax;{secure} Path=/; Max-Age={}",
             crate::state::SESSION_TTL
         )
         .parse()
@@ -108,6 +113,30 @@ pub async fn require_admin(
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
+    // CSRF: state-changing requests must originate from our own origin.
+    // SameSite=Lax already blocks cross-site POSTs in modern browsers; the
+    // Origin check closes older browsers and exotic vectors (issue #5).
+    if req.method() != axum::http::Method::GET
+        && req.method() != axum::http::Method::HEAD
+        && req.uri().path() != "/login"
+    {
+        let ok = match headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
+            Some(origin) => {
+                origin.starts_with('/')
+                    || req
+                        .headers()
+                        .get(header::HOST)
+                        .and_then(|h| h.to_str().ok())
+                        .is_some_and(|host| origin.ends_with(&format!("://{host}")))
+            }
+            // No Origin header (curl, API clients) — SameSite plus session
+            // auth cover these; do not break non-browser use.
+            None => true,
+        };
+        if !ok {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
     if !app.admin_set().await {
         return next.run(req).await;
     }

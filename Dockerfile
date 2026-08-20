@@ -21,10 +21,14 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/a2a-switchboard /usr/local/bin/a2a-switchboard
-
-VOLUME ["/data"]
-ENV AGW_DATA_DIR=/data
-EXPOSE 9920
+ RUN useradd --system --uid 1000 --user-group switchboard
+ COPY --from=build /src/target/release/a2a-switchboard /usr/local/bin/a2a-switchboard
+ 
+ VOLUME ["/data"]
+ ENV AGW_DATA_DIR=/data
+ USER switchboard
+ EXPOSE 9920
++# NOTE: the container runs as UID 1000 — bind-mounted data dirs must be
++# writable by that uid (chown 1000:1000 ./data), named volumes handle it.
 
 ENTRYPOINT ["/usr/local/bin/a2a-switchboard"]

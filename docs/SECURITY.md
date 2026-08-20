@@ -74,10 +74,20 @@ the operator (admin UI delete → re-register), never via a shared token.
 
 ## Admin UI
 
-- **Unauthenticated by design** (your call for self-hosting). Mitigations:
-  default bind `127.0.0.1`; loud warning banner + startup log when bound
-  wider; docs push TLS + auth at the terminator.
-- v2: admin token + optional OIDC.
+- **Never unauthenticated (0.6.0+)**. The first-run admin password is
+  generated at startup and printed to the logs once (same pattern as the
+  tokens); the UI is gated by `require_admin` from boot — there is no
+  unauthenticated setup window (issue #4). Changing it requires the current
+  password; the first-set-from-LAN form and its RFC1918 "local" heuristics
+  are gone.
+- Passwords are stored as **argon2id** PHC strings; legacy single-iteration
+  SHA-256 entries are transparently upgraded on first successful login.
+- Session cookies: `HttpOnly` + `SameSite=Lax`; add `Secure` with
+  `AGW_COOKIE_SECURE=1` when a TLS terminator fronts the gateway. Sessions
+  are fresh random tokens per login, TTL 12h, dropped on logout.
+- State files (`state.json`, `routing.jsonl`) are created **0600**.
+- CSRF: state-changing POSTs on the admin router reject mismatched `Origin`
+  headers (SameSite=Lax covers the rest).
 
 ## Logging hygiene
 
@@ -87,7 +97,8 @@ the operator (admin UI delete → re-register), never via a shared token.
 
 ## Rate limits
 
-Per-IP fixed-window: 20/min registration, 120/min proxy + channel responses.
+Per-IP **rolling 60s window**: 20/min registration, 120/min proxy, channel
+responses, and `/.well-known/agent.json`. No fixed-window boundary burst.
 Channel queue depth 256; excess is 503 (retryable), not a silent drop.
 
 ## Reporting
