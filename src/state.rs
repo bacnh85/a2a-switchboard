@@ -271,9 +271,8 @@ pub struct Inner {
 }
 
 /// Admin password credential. `hash` is argon2id (PHC string) for new
-/// passwords; legacy entries (single-iteration salted SHA-256, pre-0.6.0)
-/// carry `hash` = "sha256$<hex>" and are transparently upgraded to argon2id
-/// on the next successful login.
+/// passwords; pre-0.6.0 entries are a bare 64-hex salted SHA-256 (no marker)
+/// and are transparently upgraded to argon2id on the next successful login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminCred {
     pub salt: String,
@@ -300,8 +299,8 @@ impl AdminCred {
 
     /// Verify against argon2id or the legacy sha256 format.
     fn verify(&self, pw: &str) -> bool {
-        if let Some(legacy) = self.hash.strip_prefix("sha256$") {
-            return crate::auth::ct_eq(&hash_pw_legacy(&self.salt, pw), legacy);
+        if self.is_legacy() {
+            return crate::auth::ct_eq(&hash_pw_legacy(&self.salt, pw), &self.hash);
         }
         use argon2::PasswordVerifier;
         let Ok(parsed) = argon2::PasswordHash::new(&self.hash) else {
@@ -312,9 +311,11 @@ impl AdminCred {
             .is_ok()
     }
 
-    /// True when this credential still uses the legacy single-iteration hash.
+    /// True when this credential still uses the pre-0.6.0 format: a bare
+    /// 64-hex-char salted SHA-256 (0.5.x wrote it without any marker, so
+    /// legacy = everything that is not an argon2 PHC string).
     fn is_legacy(&self) -> bool {
-        self.hash.starts_with("sha256$")
+        !self.hash.starts_with("$argon2")
     }
 }
 
