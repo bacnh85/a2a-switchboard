@@ -25,9 +25,9 @@ RUN useradd --system --uid 1000 --user-group switchboard
 COPY --from=build /src/target/release/a2a-switchboard /usr/local/bin/a2a-switchboard
 
 VOLUME ["/data"]
- ENV AGW_DATA_DIR=/data
- USER switchboard
- EXPOSE 9920
+ENV AGW_DATA_DIR=/data
+USER switchboard
+EXPOSE 9920
 # NOTE: the container runs as UID 1000 — bind-mounted data dirs must be
 # writable by that uid (chown 1000:1000 ./data), named volumes handle it.
 
