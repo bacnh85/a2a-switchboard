@@ -28,7 +28,7 @@ RUN apt-get update \
  ENV AGW_DATA_DIR=/data
  USER switchboard
  EXPOSE 9920
-+# NOTE: the container runs as UID 1000 — bind-mounted data dirs must be
-+# writable by that uid (chown 1000:1000 ./data), named volumes handle it.
+# NOTE: the container runs as UID 1000 — bind-mounted data dirs must be
+# writable by that uid (chown 1000:1000 ./data), named volumes handle it.
 
 ENTRYPOINT ["/usr/local/bin/a2a-switchboard"]
