@@ -2100,7 +2100,7 @@ async fn legacy_admin_hash_upgraded_to_argon2() {
         let hexhash = hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
         inner.admin = Some(a2a_switchboard::state::AdminCred {
             salt,
-            hash: format!("sha256${hexhash}"),
+            hash: hexhash, // bare hex — exactly what 0.5.x wrote (no marker)
         });
     }
     assert!(app.verify_admin_password("legacy-pass").await);
