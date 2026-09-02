@@ -63,6 +63,10 @@ pub struct PeerDetailTmpl {
     pub traffic_total: u64,
     pub ok_count: u64,
     pub err_count: u64,
+    /// traffic direction filter: "", "in" (calls TO the peer), "out" (BY it)
+    pub dir: String,
+    /// query string for the deep link into /logs/full (follows the direction)
+    pub full_log_query: String,
 }
 
 #[derive(Template)]
@@ -226,6 +230,84 @@ pub async fn logs_export(State(app): State<AppState>, Query(q): Query<LogsQuery>
         .into_response()
 }
 
+/// GET /metrics — Prometheus text format (v0.0.4). Token-gated: localhost or
+/// any valid token (gateway/bootstrap, or a peer's per-peer caller token).
+/// Counters are bumped in log_route; gauges read live state.
+pub async fn metrics(State(app): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    if !is_localhost() {
+        let Some(token) = crate::auth::extract_token(&headers) else {
+            return crate::auth::unauthorized();
+        };
+        let (gateway, bootstrap) = {
+            let inner = app.inner.read().await;
+            (inner.gateway_token.clone(), inner.bootstrap_token.clone())
+        };
+        if !crate::peers::authorized_token(&app, &token, &gateway, &bootstrap).await {
+            return crate::auth::forbidden();
+        }
+    }
+    let mut counters: Vec<(String, u64)> = {
+        let m = app.metrics.lock().unwrap();
+        m.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    };
+    counters.sort();
+    let (peers_by_state, channel_count) = {
+        let inner = app.inner.read().await;
+        let mut by_state: std::collections::BTreeMap<String, u64> = Default::default();
+        for p in &inner.peers {
+            *by_state.entry(p.state_str().to_string()).or_insert(0) += 1;
+        }
+        (by_state, app.channels.len())
+    };
+    // Label values come from peer names + HTTP methods — escape backslash,
+    // quote, and newline per the Prometheus text exposition format.
+    let esc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    };
+    let mut body = String::new();
+    body.push_str("# TYPE a2a_switchboard_requests_total counter\n");
+    for (key, v) in &counters {
+        let parts: Vec<&str> = key.split('\t').collect();
+        let (src, dst, method, status) = match parts.as_slice() {
+            [s, d, m, st] => (s, d, m, st),
+            _ => continue,
+        };
+        body.push_str(&format!(
+            "a2a_switchboard_requests_total{{src=\"{}\",dst=\"{}\",method=\"{}\",status=\"{}\"}} {v}\n",
+            esc(src),
+            esc(dst),
+            esc(method),
+            status
+        ));
+    }
+    body.push_str("# TYPE a2a_switchboard_peers gauge\n");
+    for (state, n) in &peers_by_state {
+        body.push_str(&format!("a2a_switchboard_peers{{state=\"{state}\"}} {n}\n"));
+    }
+    body.push_str("# TYPE a2a_switchboard_channels gauge\n");
+    body.push_str(&format!("a2a_switchboard_channels {channel_count}\n"));
+    body.push_str("# TYPE a2a_switchboard_uptime_seconds gauge\n");
+    body.push_str(&format!(
+        "a2a_switchboard_uptime_seconds {}\n",
+        now().saturating_sub(app.started_at)
+    ));
+    body.push_str("# TYPE a2a_switchboard_build_info gauge\n");
+    body.push_str(&format!(
+        "a2a_switchboard_build_info{{version=\"{}\"}} 1\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
+}
+
 #[derive(Default, Clone)]
 struct LogFilters {
     src: String,
@@ -285,13 +367,23 @@ fn filter_routing_log(data_dir: &std::path::Path, f: &LogFilters) -> Vec<RouteEn
 
 /// GET /peers/{name} — detail page: agent card (capabilities/skills),
 /// registration/liveness metadata, and per-peer traffic history.
-pub async fn peer_detail(State(app): State<AppState>, Path(name): Path<String>) -> Response {
+/// `?dir=in` shows only calls TO the peer, `?dir=out` only calls BY it.
+pub async fn peer_detail(
+    State(app): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
     let peer = {
         let inner = app.inner.read().await;
         inner.peers.iter().find(|p| p.name == name).cloned()
     };
     let Some(peer) = peer else {
         return (axum::http::StatusCode::NOT_FOUND, "unknown peer").into_response();
+    };
+    let dir = match q.get("dir").map(String::as_str) {
+        Some("in") => "in",
+        Some("out") => "out",
+        _ => "",
     };
     let registered_at = crate::state::fmt_dt(peer.registered_at);
     let last_seen = peer.last_seen.map(crate::state::fmt_dt).unwrap_or_default();
@@ -306,13 +398,19 @@ pub async fn peer_detail(State(app): State<AppState>, Path(name): Path<String>) 
     let card_pretty = serde_json::to_string_pretty(&peer.card).unwrap_or_else(|_| "{}".into());
 
     // per-peer traffic from routing.jsonl (peer appears as src or dst) —
-    // filtered inside spawn_blocking so the async worker never blocks on I/O
-    let dir = app.data_dir.clone();
+    // direction-filtered inside spawn_blocking so the async worker never
+    // blocks on I/O
+    let data_dir = app.data_dir.clone();
     let peer_name = name.clone();
+    let dir_moved = dir.to_string();
     let all = tokio::task::spawn_blocking(move || {
-        read_routing_log(&dir)
+        read_routing_log(&data_dir)
             .into_iter()
-            .filter(|e| e.src == peer_name || e.dst == peer_name)
+            .filter(|e| match dir_moved.as_str() {
+                "in" => e.dst == peer_name,
+                "out" => e.src == peer_name,
+                _ => e.src == peer_name || e.dst == peer_name,
+            })
             .collect::<Vec<_>>()
     })
     .await
@@ -346,6 +444,8 @@ pub async fn peer_detail(State(app): State<AppState>, Path(name): Path<String>) 
         traffic_total,
         ok_count,
         err_count,
+        dir: dir.to_string(),
+        full_log_query: format!("{}{}", if dir == "out" { "src=" } else { "dst=" }, name),
     };
     Html(t.render().unwrap_or_default()).into_response()
 }

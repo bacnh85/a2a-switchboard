@@ -328,7 +328,7 @@ async fn inner2(app: &AppState, name: &str) -> Option<String> {
 }
 
 /// True when the token is the gateway/bootstrap token OR a peer's caller token.
-async fn authorized_token(app: &AppState, token: &str, gateway: &str, bootstrap: &str) -> bool {
+pub async fn authorized_token(app: &AppState, token: &str, gateway: &str, bootstrap: &str) -> bool {
     if classify_token(token, gateway, bootstrap).is_some() {
         return true;
     }
@@ -612,23 +612,6 @@ pub async fn proxy(
     }
 
     let resp = req.send().await;
-    let status = match &resp {
-        Ok(r) => r.status().as_u16(),
-        Err(_) => 502,
-    };
-    app.log_route(crate::state::RouteEntry {
-        ts: now(),
-        src: src.clone(),
-        dst: name.clone(),
-        method: method_s.clone(),
-        status,
-        bytes: body_len as u64,
-        latency_ms: started.elapsed().as_millis() as u64,
-        rpc_method: audit.rpc_method,
-        rpc_id: audit.rpc_id,
-        preview: audit.preview,
-    })
-    .await;
 
     match resp {
         Ok(upstream) => {
@@ -652,6 +635,24 @@ pub async fn proxy(
                 }
             }
             let bytes = upstream.bytes().await.unwrap_or_default();
+            // Response-side audit from the buffered body (JSON-RPC only —
+            // non-JSON bodies yield nothing; see audit_extract_response).
+            let (task_state, resp_preview) = crate::state::audit_extract_response(&bytes);
+            app.log_route(crate::state::RouteEntry {
+                ts: now(),
+                src: src.clone(),
+                dst: name.clone(),
+                method: method_s.clone(),
+                status: status.as_u16(),
+                bytes: body_len as u64,
+                latency_ms: started.elapsed().as_millis() as u64,
+                rpc_method: audit.rpc_method,
+                rpc_id: audit.rpc_id,
+                preview: audit.preview,
+                resp_preview,
+                task_state,
+            })
+            .await;
             // Mark healthy + last_seen + last_ip on any successful exchange.
             let mut inner = app.inner.write().await;
             if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
@@ -671,6 +672,21 @@ pub async fn proxy(
                 .into_response()
         }
         Err(e) => {
+            app.log_route(crate::state::RouteEntry {
+                ts: now(),
+                src,
+                dst: name.clone(),
+                method: method_s,
+                status: 502,
+                bytes: body_len as u64,
+                latency_ms: started.elapsed().as_millis() as u64,
+                rpc_method: audit.rpc_method,
+                rpc_id: audit.rpc_id,
+                preview: audit.preview,
+                resp_preview: None,
+                task_state: None,
+            })
+            .await;
             let mut inner = app.inner.write().await;
             if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
                 p.healthy = Some(false);
@@ -745,11 +761,15 @@ async fn channel_roundtrip(
     let method_s = method.to_string();
     let audit = crate::state::audit_extract(&body);
     let status;
+    // Buffered response bytes for response-side audit (None on channel errors).
+    let mut resp_bytes: Option<Vec<u8>> = None;
     let out = if let Some(rx) = app.channels.deliver(&name, head) {
         match tokio::time::timeout(PROXY_TIMEOUT, rx).await {
             Ok(Ok(resp)) => {
                 status = resp.status;
-                decode_channel_resp(resp)
+                let (r, b) = decode_channel_resp(resp);
+                resp_bytes = Some(b);
+                r
             }
             Ok(Err(_)) => {
                 status = 502;
@@ -764,6 +784,10 @@ async fn channel_roundtrip(
         status = 502;
         err(StatusCode::BAD_GATEWAY, "peer channel send failed")
     };
+    let (task_state, resp_preview) = match &resp_bytes {
+        Some(b) => crate::state::audit_extract_response(b),
+        None => (None, None),
+    };
     app.log_route(crate::state::RouteEntry {
         ts: now(),
         src,
@@ -775,21 +799,32 @@ async fn channel_roundtrip(
         rpc_method: audit.rpc_method,
         rpc_id: audit.rpc_id,
         preview: audit.preview,
+        resp_preview,
+        task_state,
     })
     .await;
     out
 }
 
 /// Decode a channel response into an axum Response with the same header
-/// filtering as the direct path. Size-capped before decode (OOM guard).
-fn decode_channel_resp(resp: crate::channel::RespEnvelope) -> Response {
+/// filtering as the direct path; also returns the decoded body bytes for
+/// response-side audit. Size-capped before decode (OOM guard).
+fn decode_channel_resp(resp: crate::channel::RespEnvelope) -> (Response, Vec<u8>) {
     use base64::Engine as _;
     if resp.body_b64.len() > crate::channel::MAX_CHANNEL_BODY * 4 / 3 + 4 {
-        return err(StatusCode::PAYLOAD_TOO_LARGE, "channel response too large");
+        return (
+            err(StatusCode::PAYLOAD_TOO_LARGE, "channel response too large"),
+            Vec::new(),
+        );
     }
     let bytes = match base64::engine::general_purpose::STANDARD.decode(&resp.body_b64) {
         Ok(b) if b.len() <= crate::channel::MAX_CHANNEL_BODY => b,
-        _ => return err(StatusCode::PAYLOAD_TOO_LARGE, "channel response too large"),
+        _ => {
+            return (
+                err(StatusCode::PAYLOAD_TOO_LARGE, "channel response too large"),
+                Vec::new(),
+            )
+        }
     };
     // RFC 9110 hop-by-hop + auth-challenge headers never reach the caller.
     const RESPONSE_SKIP: [&str; 8] = [
@@ -820,5 +855,5 @@ fn decode_channel_resp(resp: crate::channel::RespEnvelope) -> Response {
         }
     }
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::BAD_GATEWAY);
-    (status, headers, bytes).into_response()
+    ((status, headers, bytes.clone()).into_response(), bytes)
 }

@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Response-side audit**: routing entries now capture the A2A task
+  lifecycle state (`result.status.state`, or `error` on a JSON-RPC error
+  response) and a redacted, capped preview of the response result
+  (`resp_preview`, `task_state` in `routing.jsonl`). Old log lines keep
+  parsing (serde defaults). Honors `AGW_AUDIT_PREVIEWS=false` for previews;
+  the state field is metadata and is always kept.
+- **Prometheus `/metrics`** (text format v0.0.4): token-gated — localhost
+  always allowed; remotely requires a gateway, bootstrap, or peer caller
+  token. Exposes `a2a_switchboard_requests_total{src,dst,method,status}`,
+  `a2a_switchboard_peers{state}`, `a2a_switchboard_channels`,
+  `a2a_switchboard_uptime_seconds`, `a2a_switchboard_build_info{version}`.
+- **Peer detail page audit parity**: the per-peer traffic table now has
+  expandable rows (request + response preview, task state, RPC id) shared
+  with the Logs tab, plus a direction filter (`?dir=in|out`) with matching
+  deep links into `/logs/full?src=…`/`?dst=…`.
+
 ## [0.6.0] - 2026-08-19
 
 ### Security (fixes #4, #5)

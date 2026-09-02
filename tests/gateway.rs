@@ -1466,6 +1466,8 @@ async fn sse_stream_terminates_after_logout() {
                 rpc_method: None,
                 rpc_id: None,
                 preview: None,
+                resp_preview: None,
+                task_state: None,
             })
             .await;
         if let Some(Ok(chunk)) = stream.next().await {
@@ -2166,6 +2168,8 @@ async fn routing_log_rotation_and_perm() {
         rpc_method: None,
         rpc_id: None,
         preview: None,
+        resp_preview: None,
+        task_state: None,
     };
     for _ in 0..60 {
         app.log_route(entry.clone()).await;
@@ -2239,4 +2243,322 @@ async fn rolling_window_rate_limiter() {
     assert!(!rl.allow("k", 5), "6th within window must be denied");
     // per-key isolation: an unrelated key is unaffected
     assert!(rl.allow("other", 5), "different key has its own window");
+}
+
+// ---- /metrics (token-gated Prometheus text format) ----
+
+/// Restores the process-wide LOCALHOST static on drop. cargo test runs
+/// test fns on parallel threads sharing this static (the suite is run
+/// single-threaded in CI for SSE timing, but must not depend on that), and
+/// an assert failing mid-test must not leave it flipped for other tests.
+struct LocalhostGuard;
+impl Drop for LocalhostGuard {
+    fn drop(&mut self) {
+        a2a_switchboard::admin::LOCALHOST.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn metrics_requires_token_off_localhost() {
+    let (router, _app, gw, boot) = test_app().await;
+    // Simulate a non-loopback bind so the token gate engages.
+    a2a_switchboard::admin::LOCALHOST.store(false, std::sync::atomic::Ordering::Relaxed);
+    let _guard = LocalhostGuard;
+
+    // no token → 401
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/metrics", None, None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    // gateway token → 200 with Prometheus content type
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/metrics", Some(&gw), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers().get("content-type").unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let text = String::from_utf8_lossy(&b);
+    assert!(text.contains("a2a_switchboard_build_info"));
+    assert!(text.contains("a2a_switchboard_uptime_seconds"));
+    assert!(text.contains("a2a_switchboard_peers"));
+
+    // bootstrap token → also accepted
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/metrics", Some(&boot), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // unknown token → 403
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/metrics", Some("agw_bogus"), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn metrics_counts_proxied_calls_and_accepts_caller_token() {
+    let fake = axum::Router::new().route(
+        "/",
+        axum::routing::post(|| async {
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "jsonrpc":"2.0","id":1,
+                    "result":{"id":"task-1","status":{"state":"completed"}}
+                })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+    let (router, _app, gw, _boot) = test_app().await;
+    // register with the GATEWAY token → pending, then mint a caller token
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+    // accept via admin session not needed for /peer on pending → 403; use
+    // the direct state mutation used elsewhere in this suite instead.
+    {
+        // pending → accepted so the proxy path is open
+        let mut inner = _app.inner.write().await;
+        inner.peers[0].state = PeerState::Accepted;
+        let ct = a2a_switchboard::state::gen_token();
+        inner.peers[0].caller_token = Some(ct.clone());
+        drop(inner);
+
+        // proxied call WITH the peer caller token (advisor: must be accepted)
+        a2a_switchboard::admin::LOCALHOST.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _guard = LocalhostGuard;
+        let r = router
+            .clone()
+            .oneshot(req("GET", "/metrics", Some(&ct), None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "caller token must scrape /metrics"
+        );
+    }
+
+    // make a proxied call so the counter bumps
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/fake/",
+            Some(&gw),
+            Some(r#"{"jsonrpc":"2.0","method":"message/send","params":{}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // counter now reflects the call — src is the fingerprint label of the
+    // shared gateway token (caller attribution needs the per-peer caller token)
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/metrics", Some(&gw), None))
+        .await
+        .unwrap();
+    let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+    let text = String::from_utf8_lossy(&b);
+    assert!(
+        text.contains("dst=\"fake\"") && text.contains("status=\"200\"} 1"),
+        "counter missing from /metrics:\n{text}"
+    );
+
+    // response audit: task_state + resp_preview captured on the log entry
+    let log = _app.recent_log(10).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].task_state.as_deref(), Some("completed"));
+    assert!(log[0]
+        .resp_preview
+        .as_deref()
+        .unwrap_or("")
+        .contains("task-1"));
+}
+
+#[tokio::test]
+async fn response_audit_captures_jsonrpc_error_state() {
+    let fake = axum::Router::new().route(
+        "/",
+        axum::routing::post(|| async {
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "jsonrpc":"2.0","id":1,
+                    "error":{"code":-32601,"message":"method not found"}
+                })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/fake/",
+            Some(&boot),
+            Some(r#"{"jsonrpc":"2.0","method":"message/send","params":{}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let log = app.recent_log(10).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].task_state.as_deref(), Some("error"));
+}
+
+#[tokio::test]
+async fn peer_detail_direction_filter() {
+    let fake = axum::Router::new()
+        .route(
+            "/",
+            axum::routing::post(|| async { (axum::http::StatusCode::OK, "ok") }),
+        )
+        .route(
+            "/.well-known/agent-card.json",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"name":"fake"})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+
+    // one outbound call (bootstrap → fake)
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/fake/",
+            Some(&boot),
+            Some(r#"{"jsonrpc":"2.0","method":"message/send","params":{}}"#),
+        ))
+        .await
+        .unwrap();
+    // one inbound-only log entry: fake as src (fabricate via log_route)
+    app.log_route(a2a_switchboard::state::RouteEntry {
+        ts: a2a_switchboard::state::now(),
+        src: "fake".into(),
+        dst: "other-peer".into(),
+        method: "POST".into(),
+        status: 200,
+        bytes: 1,
+        latency_ms: 1,
+        rpc_method: None,
+        rpc_id: None,
+        preview: None,
+        resp_preview: None,
+        task_state: None,
+    })
+    .await;
+
+    // admin session for the UI pages (no admin password set in test_app →
+    // create the session cookie directly)
+    let sid = app.create_session();
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peers/fake", None, None).with_header("cookie", &sid))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let b = axum::body::to_bytes(r.into_body(), 262144).await.unwrap();
+    let html = String::from_utf8_lossy(&b);
+    assert!(
+        html.contains("other-peer"),
+        "all-direction shows both entries"
+    );
+    assert!(
+        html.contains("/logs/full?dst=fake"),
+        "default deep link follows dst"
+    );
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peers/fake?dir=out", None, None).with_header("cookie", &sid))
+        .await
+        .unwrap();
+    let b = axum::body::to_bytes(r.into_body(), 262144).await.unwrap();
+    let html = String::from_utf8_lossy(&b);
+    assert!(
+        html.contains("other-peer"),
+        "out direction shows fake as src"
+    );
+    assert!(
+        html.contains("/logs/full?src=fake"),
+        "out deep link uses src"
+    );
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peers/fake?dir=in", None, None).with_header("cookie", &sid))
+        .await
+        .unwrap();
+    let b = axum::body::to_bytes(r.into_body(), 262144).await.unwrap();
+    let html = String::from_utf8_lossy(&b);
+    assert!(
+        !html.contains("other-peer"),
+        "in direction must exclude entries where fake is only the src"
+    );
+}
+
+#[tokio::test]
+async fn old_format_routing_log_still_parses_with_new_fields_absent() {
+    // 0.6.x lines without resp_preview/task_state must deserialize (serde
+    // defaults) — extends the pre-audit guard above to the new fields.
+    let entry: Result<a2a_switchboard::state::RouteEntry, _> = serde_json::from_str(
+        "{\"ts\":1786000000,\"src\":\"a\",\"dst\":\"b\",\"method\":\"POST\",\"status\":200,\"bytes\":10,\"latency_ms\":5,\"rpc_method\":\"message/send\",\"rpc_id\":\"1\",\"preview\":\"p\"}",
+    );
+    let e = entry.unwrap();
+    assert!(e.resp_preview.is_none());
+    assert!(e.task_state.is_none());
 }

@@ -118,6 +118,13 @@ pub struct RouteEntry {
     /// Redacted, capped preview of the request params (audit trail).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// Redacted, capped preview of the response result (audit trail).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resp_preview: Option<String>,
+    /// A2A task lifecycle state from the response (`result.status.state`),
+    /// or "error" on a JSON-RPC error response (audit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_state: Option<String>,
 }
 
 impl RouteEntry {
@@ -233,6 +240,37 @@ pub fn audit_extract(body: &[u8]) -> AuditInfo {
     }
 }
 
+/// Extract audit info from a response body: the A2A task lifecycle state
+/// (`result.status.state`) or "error" on a JSON-RPC error, plus a redacted,
+/// size-capped preview of the result. Returns `(task_state, resp_preview)`.
+/// Guard extraction to JSON only at the call site (see peers.rs) — if SSE
+/// passthrough ever lands there, non-JSON bodies must not be buffered.
+pub fn audit_extract_response(body: &[u8]) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return (None, None);
+    };
+    // A2A Task objects carry lifecycle in result.status.state.
+    let task_state = if v.get("error").is_some() {
+        Some("error".to_string())
+    } else {
+        v.get("result")
+            .and_then(|r| r.get("status"))
+            .and_then(|s| s.get("state"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.chars().take(64).collect())
+    };
+    let mut preview = redact_json(v.get("result").unwrap_or(&v), PREVIEW_DEPTH).to_string();
+    if preview.len() > PREVIEW_MAX {
+        let mut end = PREVIEW_MAX;
+        while !preview.is_char_boundary(end) {
+            end -= 1;
+        }
+        preview.truncate(end);
+        preview.push('…');
+    }
+    (task_state, Some(preview))
+}
+
 #[derive(Default)]
 pub struct RateLimiter {
     // key -> accepted request timestamps (unix secs), ascending.
@@ -332,6 +370,11 @@ pub struct App {
     pub channels: crate::channel::Channels,
     /// Admin UI sessions: token -> expires_unix. In-memory; restart logs out.
     pub sessions: Mutex<HashMap<String, i64>>,
+    /// Prometheus counters keyed "{src}\t{dst}\t{method}\t{status}" — bumped
+    /// in log_route (the single choke point), rendered by /metrics.
+    pub metrics: Mutex<HashMap<String, u64>>,
+    /// Process start (unix secs) for the uptime gauge.
+    pub started_at: i64,
 }
 
 /// routing.jsonl size cap before rotation (bytes). 0 disables the file log.
@@ -440,6 +483,8 @@ impl App {
             http,
             channels: crate::channel::Channels::new(),
             sessions: Mutex::new(HashMap::new()),
+            metrics: Mutex::new(HashMap::new()),
+            started_at: now(),
         };
         // Tighten an existing state.json/routing.jsonl left world-readable by
         // an older build (issue #5).
@@ -509,7 +554,11 @@ impl App {
         let mut e = e;
         if !preview_enabled {
             e.preview = None;
+            e.resp_preview = None;
         }
+        // Prometheus counter — key order matches the /metrics label set.
+        let key = format!("{}\t{}\t{}\t{}", e.src, e.dst, e.method, e.status);
+        *self.metrics.lock().unwrap().entry(key).or_insert(0) += 1;
         if let Ok(mut json) = serde_json::to_string(&e) {
             json.push('\n');
             self.append_routing_log(&json);

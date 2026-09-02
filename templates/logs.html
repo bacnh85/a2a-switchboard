@@ -17,7 +17,7 @@
   <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>
   <tbody>
   {% for e in entries %}
-  <tr class="log-row{% if e.status >= 400 %} log-row-err{% endif %}" tabindex="0" aria-expanded="false"{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %} data-method="{{e.method_display()}}" data-http="{{e.method}}" data-rpc-id="{% if let Some(id) = e.rpc_id %}{{id}}{% endif %}">
+  <tr class="log-row{% if e.status >= 400 %} log-row-err{% endif %}" tabindex="0" aria-expanded="false"{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %}{% if let Some(p) = e.resp_preview %} data-resp-preview="{{p}}"{% endif %}{% if let Some(s) = e.task_state %} data-task-state="{{s}}"{% endif %} data-method="{{e.method_display()}}" data-http="{{e.method}}" data-rpc-id="{% if let Some(id) = e.rpc_id %}{{id}}{% endif %}">
     <td>{{e.ts_dt()}}</td>
     <td>{{e.src}}</td>
     <td>{{e.dst}}</td>
@@ -31,38 +31,7 @@
   {% if entries.is_empty() %}<tr><td colspan="7" class="empty">No matching entries.</td></tr>{% endif %}
   </tbody>
 </table>
-<script>
-(function () {
-  var tbl = document.querySelector('.tbl');
-  if (!tbl) return;
-  tbl.addEventListener('click', function (ev) {
-    var row = ev.target.closest('.log-row');
-    if (!row) return;
-    toggleRow(row);
-  });
-  tbl.addEventListener('keydown', function (ev) {
-    if (ev.key !== 'Enter' && ev.key !== ' ') return;
-    var row = ev.target.closest('.log-row');
-    if (!row) return;
-    ev.preventDefault();
-    toggleRow(row);
-  });
-  function toggleRow(row) {
-    var detail = row.nextElementSibling;
-    if (!detail || !detail.classList.contains('log-detail')) return;
-    var cell = detail.firstElementChild;
-    if (!cell.textContent) {
-      var lines = ['RPC: ' + (row.dataset.method || '') + ' (HTTP ' + (row.dataset.http || '') + ')'];
-      if (row.dataset.rpcId) lines.push('id: ' + row.dataset.rpcId);
-      lines.push('request preview: ' + (row.dataset.preview || '—'));
-      cell.textContent = lines.join('\n');
-    }
-    detail.hidden = !detail.hidden;
-    row.setAttribute('aria-expanded', String(!detail.hidden));
-    row.classList.toggle('expanded', !detail.hidden);
-  }
-})();
-</script>
+<script src="/assets/expand.js"></script>
 {% if !q_src.is_empty() || !q_dst.is_empty() || !q_method.is_empty() || !q_status.is_empty() || errors_only %}
 <p class="muted">Showing {{total}} matching entries from <code>data/routing.jsonl</code>. <a href="/logs/full">Clear filters</a> to see the latest 500.</p>
 {% else %}

@@ -81,6 +81,16 @@ impl Channels {
         self.peers.read().unwrap().contains_key(name)
     }
 
+    /// Number of live peer channels (metrics gauge).
+    pub fn len(&self) -> usize {
+        self.peers.read().unwrap().len()
+    }
+
+    /// True when no peer holds a live channel.
+    pub fn is_empty(&self) -> bool {
+        self.peers.read().unwrap().is_empty()
+    }
+
     /// Bind (or replace) the channel for a peer. Returns the receiver, a
     /// sender clone for disconnect detection, and the per-connection secret
     /// the peer must echo on every response POST.

@@ -62,6 +62,16 @@ First run prints the gateway token and bootstrap token. They're also in
  | `server.routing_log_max_mb` | `AGW_ROUTING_LOG_MAX_MB` | `64` | `routing.jsonl` size cap before rotating to `.1` (0 = no file log) |
  | `server.audit_previews` | `AGW_AUDIT_PREVIEWS` | `true` | Keep redacted request previews in the audit log |
 
+### Prometheus metrics
+
+`GET /metrics` serves the Prometheus text format (v0.0.4). Authentication:
+localhost is always allowed; remote scrapers must present a gateway,
+bootstrap, or peer caller token (`Authorization: Bearer …`). Counters:
+`a2a_switchboard_requests_total{src,dst,method,status}`, gauges:
+`a2a_switchboard_peers{state}`, `a2a_switchboard_channels`,
+`a2a_switchboard_uptime_seconds`, `a2a_switchboard_build_info{version}`.
+Restart resets counters (standard Prometheus semantics).
+
 Optional `config.toml` in the working directory (see `config.toml.example`).
 Env vars override config file; defaults fill the rest.
 

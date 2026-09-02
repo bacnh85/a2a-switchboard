@@ -77,6 +77,8 @@ pub fn router(app: Arc<App>) -> axum::Router {
         .route("/peer/{name}/{*rest}", axum::routing::any(peers::proxy))
         .route("/channel", get(channel::channel_open))
         .route("/channel/response/{id}", post(channel::channel_response))
+        // token-gated, NOT behind require_admin (metrics does its own auth)
+        .route("/metrics", get(admin::metrics))
         .route("/login", get(login::login_page).post(login::login))
         .route("/logout", post(login::logout))
         .route("/assets/{*path}", get(asset))
