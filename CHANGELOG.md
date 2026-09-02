@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.6.2] - 2026-09-02
 
 ### Added
 
@@ -21,6 +21,8 @@ All notable changes to this project are documented in this file.
   expandable rows (request + response preview, task state, RPC id) shared
   with the Logs tab, plus a direction filter (`?dir=in|out`) with matching
   deep links into `/logs/full?src=…`/`?dst=…`.
+- **Deployment runbook** for validate-before-image binary deploys
+  (`docs/integrations/remote-binary-deploy.md`).
 
 ## [0.6.0] - 2026-08-19
 
