@@ -24,6 +24,17 @@ All notable changes to this project are documented in this file.
 - **Deployment runbook** for validate-before-image binary deploys
   (`docs/integrations/remote-binary-deploy.md`).
 
+## [0.6.1] - 2026-08-20
+
+### Fixed
+
+- **Admin login lockout for upgraded deployments**: 0.6.0's legacy-credential
+  detection looked for a `sha256$` marker that never shipped; real 0.5.x
+  `state.json` stores a bare 64-hex salted SHA-256, which fell through to the
+  argon2 parser and failed. Legacy credentials are now detected by the
+  absence of the `$argon2` PHC prefix; the transparent upgrade-on-login
+  re-hash is preserved. (`b3862bc`)
+
 ## [0.6.0] - 2026-08-19
 
 ### Security (fixes #4, #5)
