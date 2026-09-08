@@ -1,0 +1,77 @@
+{# Peer detail body — included by peer_detail.html (parent context) and
+   rendered standalone by /peers/{name}?fragment=1 (PeerBodyTmpl). Vars:
+   peer, channel, registered_at, last_seen, capabilities, skills, card_pretty,
+   traffic, traffic_total, ok_count, err_count, dir, full_log_query. #}
+<div class="stats">
+  <div class="stat"><span class="stat-key">{{peer.state_str()}}</span><span class="stat-label">state</span></div>
+  <div class="stat"><span class="stat-key {% if peer.healthy == Some(true) %}ok-text{% else %}bad-text{% endif %}">{% if peer.healthy == Some(true) %}healthy{% else %}unreachable{% endif %}</span><span class="stat-label">health</span></div>
+  <div class="stat"><span class="stat-num">{{traffic_total}}</span><span class="stat-label">routed ({{ok_count}} ok / {{err_count}} err)</span></div>
+</div>
+
+<section class="card">
+  <h2>Identity</h2>
+  <table class="kv">
+    <tr><th>Name</th><td class="mono">{{peer.name}}</td></tr>
+    <tr><th>Endpoint</th><td class="mono">{{peer.url}}</td></tr>
+    <tr><th>State</th><td>{{peer.state_str()}}</td></tr>
+    <tr><th>Source</th><td>{% if peer.auto_accepted %}bootstrap{% else %}manual{% endif %}</td></tr>
+    <tr><th>Registered</th><td>{{registered_at}}</td></tr>
+    <tr><th>Registered from IP</th><td class="mono">{{peer.reg_ip_str()}}</td></tr>
+    <tr><th>Last seen</th><td>{{last_seen}}{% if peer.last_seen.is_some() %} ({{peer.last_seen_dt()}}){% endif %}</td></tr>
+    <tr><th>Last IP</th><td class="mono">{{peer.last_ip_str()}}</td></tr>
+    <tr><th>Last error</th><td class="mono">{% if let Some(e) = peer.last_error %}{{e}}{% else %}—{% endif %}</td></tr>
+    <tr><th>Reverse channel</th><td>{% if channel %}<span class="ok">active</span>{% else %}<span class="bad">no</span>{% endif %}</td></tr>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Agent card — capabilities</h2>
+  {% if capabilities == "null" %}
+  <p class="muted">Peer registered without a card (or without capabilities).</p>
+  {% else %}
+  <pre class="json">{{capabilities}}</pre>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Agent card — skills</h2>
+  {% if skills == "null" %}
+  <p class="muted">Peer registered without a card (or without skills).</p>
+  {% else %}
+  <pre class="json">{{skills}}</pre>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Raw agent card</h2>
+  <details>
+    <summary>toggle raw card JSON</summary>
+    <pre class="json">{{card_pretty}}</pre>
+  </details>
+</section>
+
+<section class="card">
+  <h2>Recent traffic</h2>
+    <p class="muted">
+      {% if dir == "in" %}Inbound{% else if dir == "out" %}Outbound{% else %}All{% endif %}
+      routed requests involving this peer —
+      <a href="/peers/{{peer.name}}?dir=in"{% if dir == "in" %} class="active"{% endif %}>inbound</a> ·
+      <a href="/peers/{{peer.name}}?dir=out"{% if dir == "out" %} class="active"{% endif %}>outbound</a> ·
+      <a href="/peers/{{peer.name}}"{% if dir == "" %} class="active"{% endif %}>all</a>.
+      Full history: <a href="/logs/full?{{full_log_query}}">filtered log</a>.
+    </p>
+    <div class="tbl-wrap">
+    <table class="tbl">
+    <thead><tr><th>Time</th><th>Src</th><th>Dst</th><th>Method</th><th class="num">Status</th><th class="num">Bytes</th><th class="num">Ms</th></tr></thead>
+    <tbody>
+    {% for e in traffic %}
+    <tr class="log-row{% if e.status >= 400 %} log-row-err{% endif %}" tabindex="0" aria-expanded="false"{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %}{% if let Some(p) = e.resp_preview %} data-resp-preview="{{p}}"{% endif %}{% if let Some(s) = e.task_state %} data-task-state="{{s}}"{% endif %} data-method="{{e.method_display()}}" data-http="{{e.method}}" data-rpc-id="{% if let Some(id) = e.rpc_id %}{{id}}{% endif %}">
+      <td class="nw mono">{{e.ts_dt()}}</td><td class="mono">{{e.src}}</td><td class="mono">{{e.dst}}</td><td class="mono" title="HTTP {{e.method}}">{{e.method_display()}}</td><td class="num">{% if e.status >= 400 %}<span class="bad">{{e.status}}</span>{% else %}{{e.status}}{% endif %}</td><td class="num">{{e.bytes}}</td><td class="num">{{e.latency_ms}}</td>
+    </tr>
+    <tr class="log-detail" hidden><td colspan="7"></td></tr>
+    {% endfor %}
+    {% if traffic.is_empty() %}<tr><td colspan="7" class="empty">No routed traffic yet.</td></tr>{% endif %}
+    </tbody>
+  </table>
+  </div>
+</section>

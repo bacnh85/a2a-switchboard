@@ -3,77 +3,14 @@
 <p><a href="/peers">← back to peers</a></p>
 <h1>{{peer.name}}</h1>
 
-<div class="stats">
-  <div class="stat"><span class="stat-num">{{peer.state_str()}}</span><span class="stat-label">state</span></div>
-  <div class="stat"><span class="stat-num">{% if peer.healthy == Some(true) %}✓{% else %}✗{% endif %}</span><span class="stat-label">health</span></div>
-  <div class="stat"><span class="stat-num">{{traffic_total}}</span><span class="stat-label">routed ({{ok_count}} ok / {{err_count}} err)</span></div>
+{# Live region: /peers/{{peer.name}}?fragment=1 renders _peer_body.html
+   (same vars — peer, channel, registered_at, last_seen, capabilities, skills,
+   card_pretty, traffic, traffic_total, ok_count, err_count, dir,
+   full_log_query). #}
+<div data-live data-live-src="/peers/{{peer.name}}?dir={{dir}}&fragment=1" data-live-on="route,peers" data-live-interval="30000">
+{% include "_peer_body.html" %}
 </div>
-
-<section class="card">
-  <h2>Identity</h2>
-  <table class="kv">
-    <tr><th>name</th><td class="mono">{{peer.name}}</td></tr>
-    <tr><th>endpoint</th><td class="mono">{{peer.url}}</td></tr>
-    <tr><th>state</th><td>{{peer.state_str()}}</td></tr>
-    <tr><th>source</th><td>{% if peer.auto_accepted %}bootstrap{% else %}manual{% endif %}</td></tr>
-    <tr><th>registered</th><td>{{registered_at}}</td></tr>
-    <tr><th>registered from IP</th><td class="mono">{{peer.reg_ip_str()}}</td></tr>
-    <tr><th>last seen</th><td>{{last_seen}}{% if peer.last_seen.is_some() %} ({{peer.last_seen_dt()}}){% endif %}</td></tr>
-    <tr><th>last IP</th><td class="mono">{{peer.last_ip_str()}}</td></tr>
-    <tr><th>last error</th><td class="mono">{% if let Some(e) = peer.last_error %}{{e}}{% else %}—{% endif %}</td></tr>
-    <tr><th>reverse channel</th><td>{% if channel %}<span class="ok">active</span>{% else %}<span class="bad">no</span>{% endif %}</td></tr>
-  </table>
-</section>
-
-<section class="card">
-  <h2>Agent card — capabilities</h2>
-  {% if capabilities == "null" %}
-  <p class="muted">Peer registered without a card (or without capabilities).</p>
-  {% else %}
-  <pre class="json">{{capabilities}}</pre>
-  {% endif %}
-</section>
-
-<section class="card">
-  <h2>Agent card — skills</h2>
-  {% if skills == "null" %}
-  <p class="muted">Peer registered without a card (or without skills).</p>
-  {% else %}
-  <pre class="json">{{skills}}</pre>
-  {% endif %}
-</section>
-
-<section class="card">
-  <h2>Raw agent card</h2>
-  <details>
-    <summary>toggle raw card JSON</summary>
-    <pre class="json">{{card_pretty}}</pre>
-  </details>
-</section>
-
-<section class="card">
-  <h2>Recent traffic</h2>
-    <p class="muted">
-      {% if dir == "in" %}Inbound{% else if dir == "out" %}Outbound{% else %}All{% endif %}
-      routed requests involving this peer —
-      <a href="/peers/{{peer.name}}?dir=in"{% if dir == "in" %} class="active"{% endif %}>inbound</a> ·
-      <a href="/peers/{{peer.name}}?dir=out"{% if dir == "out" %} class="active"{% endif %}>outbound</a> ·
-      <a href="/peers/{{peer.name}}"{% if dir == "" %} class="active"{% endif %}>all</a>.
-      Full history: <a href="/logs/full?{{full_log_query}}">filtered log</a>.
-    </p>
-    <table class="tbl">
-    <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>
-    <tbody>
-    {% for e in traffic %}
-    <tr class="log-row{% if e.status >= 400 %} log-row-err{% endif %}" tabindex="0" aria-expanded="false"{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %}{% if let Some(p) = e.resp_preview %} data-resp-preview="{{p}}"{% endif %}{% if let Some(s) = e.task_state %} data-task-state="{{s}}"{% endif %} data-method="{{e.method_display()}}" data-http="{{e.method}}" data-rpc-id="{% if let Some(id) = e.rpc_id %}{{id}}{% endif %}">
-      <td>{{e.ts_dt()}}</td><td>{{e.src}}</td><td>{{e.dst}}</td><td class="mono" title="HTTP {{e.method}}">{{e.method_display()}}</td><td><span class="{% if e.status >= 400 %}bad{% else %}ok{% endif %}">{{e.status}}</span></td><td>{{e.bytes}}</td><td>{{e.latency_ms}}</td>
-    </tr>
-    <tr class="log-detail" hidden><td colspan="7"></td></tr>
-    {% endfor %}
-    {% if traffic.is_empty() %}<tr><td colspan="7" class="empty">No routed traffic yet.</td></tr>{% endif %}
-    </tbody>
-  </table>
-</section>
 <script src="/assets/expand.js"></script>
+<script src="/assets/live.js" defer></script>
 
 {% endblock %}

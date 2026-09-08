@@ -104,6 +104,28 @@ pi-a2a peers see these automatically as `gw/<name>` entries in `a2a_list` /
 
 ## 3. Call a peer through the switchboard
 
+### Human operators (talk to the gateway itself)
+
+Admins create **human peers** in Settings → Human operators: a name plus a
+minted token (the token is the human's `caller_token` — the secret shared
+between that human and the gateway). It authenticates exactly like a peer
+caller token for `/peer/*` calls and attributes them to the human's name.
+
+The reserved name **`gateway`** is the switchboard's own A2A agent:
+`POST /peer/gateway/` with `message/send` accepts `/help`, `/peers`,
+`/rooms`, `/whoami`, or any free text (friendly ack). It is listed in the
+directory as `gateway` → `/peer/gateway/`, so directory-based clients can
+message the switchboard directly. Humans cannot be called (no upstream
+endpoint) and are excluded from the directory listing.
+
+In the web UI, **Chat** renders the same conversations messenger-style:
+DMs (human ↔ peer / gateway), rooms with roster notifications, emoji
+composer, per-node colors, and live SSE appends. Sends use the selected
+human identity; agent↔agent `message/send` traffic through the proxy is
+mirrored into the DM threads automatically.
+
+### Proxying
+
 ```
 ANY /peer/{name}/...                (any path/query forwarded verbatim)
 Authorization: Bearer <token>

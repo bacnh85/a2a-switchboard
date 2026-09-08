@@ -2,22 +2,22 @@
 {% block content %}
 <h1>Dashboard</h1>
 <div class="stats">
-  <a class="stat" href="/logs/full"><span class="stat-num" id="stat-routed">{{total_routes}}</span><span class="stat-label">routed <span class="stat-sub">last 1000 (ring)</span></span></a>
+  <a class="stat" href="/logs/full"><span class="stat-num" id="stat-routed">{{total_routes}}</span><span class="stat-label">routed <span class="stat-sub">· last 1000</span></span></a>
   <a class="stat{% if errors > 0 %} stat-bad{% endif %}" href="/logs/full?errors=1"><span class="stat-num" id="stat-errors">{{errors}}</span><span class="stat-label">errors</span></a>
   <a class="stat" href="/logs/full"><span class="stat-num" id="stat-avg-ms">{{avg_ms}}<span class="stat-unit">ms</span></span><span class="stat-label">avg latency</span></a>
   <a class="stat{% if pending > 0 %} stat-warn{% endif %}" href="/peers#pending"><span class="stat-num" id="stat-pending">{{pending}}</span><span class="stat-label">pending approval</span></a>
 </div>
 
 <div class="dash-grid">
-  <section class="card">
+  <section>
     <h2>Routing topology</h2>
-    <p class="muted">Live view — requests flow from caller through the gateway to the destination peer and back.</p>
+    <p class="muted">Live view — requests flow from caller through the gateway to the destination peer and back. Click a peer to open its detail.</p>
     <div id="topo" class="topo" data-peers='{{peers_json}}'></div>
   </section>
   <section class="card">
     <h2>Communication log</h2>
-    <p class="muted">Every routed request, live. Click a row for the audited RPC detail. <a href="/logs/full">Full audit log →</a></p>
-    <ul id="flowlog" class="flowlog" aria-live="polite">
+    <p class="muted">Every routed request, live. Click a row for the audited RPC detail. <a href="/logs/full">Full audit log</a></p>
+    <ul id="flowlog" class="flowlog">
       {% for e in recent %}
       <li class="flow-row" data-method="{{e.method_display()}}" data-http="{{e.method}}"{% if let Some(id) = e.rpc_id %} data-rpc-id="{{id}}"{% endif %}{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %}>
         <button class="flow-line" type="button" aria-expanded="false">
@@ -26,7 +26,7 @@
           <span class="flow-arrow">→</span>
           <span class="flow-dst">{{e.dst}}</span>
           <span class="flow-method">{{e.method_display()}}</span>
-          <span class="flow-status {% if e.status >= 400 %}bad{% else %}ok{% endif %}">{{e.status}}</span>
+          <span class="flow-status{% if e.status >= 400 %} bad{% endif %}">{{e.status}}</span>
           <span class="flow-ms">{{e.latency_ms}}ms</span>
         </button>
         <div class="flow-detail" hidden></div>

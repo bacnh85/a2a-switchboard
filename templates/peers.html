@@ -2,61 +2,10 @@
 {% block content %}
 <h1>Peers</h1>
 
-{% if !pending.is_empty() %}
-<h2 id="pending">Pending approval</h2>
-<table class="tbl">
-  <thead><tr><th>name</th><th>url</th><th>registered</th><th>source IP</th><th></th></tr></thead>
-  <tbody>
-  {% for p in pending %}
-  <tr>
-    <td><a href="/peers/{{p.name}}">{{p.name}}</a></td><td class="mono">{{p.url}}</td><td>{{p.registered_at_dt()}}</td><td class="mono">{{p.reg_ip_str()}}</td>
-    <td class="actions">
-      <form method="post" action="/peers/{{p.name}}/accept"><button class="btn btn-primary">Accept</button></form>
-      <form method="post" action="/peers/{{p.name}}/reject"><button class="btn">Reject</button></form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-
-<h2>Accepted</h2>
-<table class="tbl">
-  <thead><tr><th>name</th><th>url</th><th>IP</th><th>health</th><th>last seen</th><th>registered</th><th>source</th><th></th></tr></thead>
-  <tbody>
-  {% for p in accepted %}
-  <tr>
-    <td><a href="/peers/{{p.name}}">{{p.name}}</a></td><td class="mono">{{p.url}}</td>
-    <td class="mono">{{p.last_ip_str()}}</td>
-    <td>{% if p.healthy == Some(true) %}<span class="ok">healthy</span>{% else %}<span class="bad">unreachable</span>{% endif %}</td>
-    <td>{{p.last_seen_dt()}}</td>
-    <td>{{p.registered_at_dt()}}</td>
-    <td>{% if p.auto_accepted %}bootstrap{% else %}manual{% endif %}</td>
-    <td class="actions">
-      <a class="btn" href="/peers/{{p.name}}">Details</a>
-      <form method="post" action="/peers/{{p.name}}/revoke"><button class="btn">Revoke</button></form>
-    </td>
-  </tr>
-  {% endfor %}
-  {% if accepted.is_empty() %}<tr><td colspan="8" class="empty">No accepted peers yet.</td></tr>{% endif %}
-  </tbody>
-</table>
-
-{% if !revoked.is_empty() %}
-<h2>Revoked</h2>
-<table class="tbl">
-  <thead><tr><th>name</th><th>url</th><th></th></tr></thead>
-  <tbody>
-  {% for p in revoked %}
-  <tr>
-    <td><a href="/peers/{{p.name}}">{{p.name}}</a></td><td class="mono">{{p.url}}</td>
-    <td class="actions">
-      <form method="post" action="/peers/{{p.name}}/accept"><button class="btn">Re-accept</button></form>
-      <form method="post" action="/peers/{{p.name}}/delete"><button class="btn btn-danger">Delete</button></form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
+{# Live region: /peers?fragment=1 renders _peers_body.html (same vars:
+   pending, accepted, revoked). #}
+<div data-live data-live-src="/peers?fragment=1" data-live-on="peers" data-live-interval="30000">
+{% include "_peers_body.html" %}
+</div>
+<script src="/assets/live.js" defer></script>
 {% endblock %}

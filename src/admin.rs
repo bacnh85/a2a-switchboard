@@ -42,6 +42,17 @@ pub struct PeersTmpl {
     pub revoked: Vec<Peer>,
 }
 
+/// Live-update fragment: /peers?fragment=1 → _peers_body.html (no layout).
+/// Keep this a strict subset of PeersTmpl — the partial is also included by
+/// the parent template and may only reference vars present in both structs.
+#[derive(Template)]
+#[template(path = "_peers_body.html")]
+pub struct PeersBodyTmpl {
+    pub pending: Vec<Peer>,
+    pub accepted: Vec<Peer>,
+    pub revoked: Vec<Peer>,
+}
+
 #[derive(Template)]
 #[template(path = "peer_detail.html")]
 pub struct PeerDetailTmpl {
@@ -69,6 +80,25 @@ pub struct PeerDetailTmpl {
     pub full_log_query: String,
 }
 
+/// Live-update fragment: /peers/{name}?fragment=1 → _peer_body.html.
+#[derive(Template)]
+#[template(path = "_peer_body.html")]
+pub struct PeerBodyTmpl {
+    pub peer: Peer,
+    pub channel: bool,
+    pub registered_at: String,
+    pub last_seen: String,
+    pub capabilities: String,
+    pub skills: String,
+    pub card_pretty: String,
+    pub traffic: Vec<RouteEntry>,
+    pub traffic_total: u64,
+    pub ok_count: u64,
+    pub err_count: u64,
+    pub dir: String,
+    pub full_log_query: String,
+}
+
 #[derive(Template)]
 #[template(path = "logs.html")]
 pub struct LogsTmpl {
@@ -89,6 +119,19 @@ pub struct LogsTmpl {
     pub total: u64,
 }
 
+/// Live-update fragment: /logs/full?fragment=1 → _logs_table.html.
+#[derive(Template)]
+#[template(path = "_logs_table.html")]
+pub struct LogsTableTmpl {
+    pub entries: Vec<RouteEntry>,
+    pub q_src: String,
+    pub q_dst: String,
+    pub q_status: String,
+    pub q_method: String,
+    pub errors_only: bool,
+    pub total: u64,
+}
+
 #[derive(Template)]
 #[template(path = "settings.html")]
 pub struct SettingsTmpl {
@@ -97,8 +140,12 @@ pub struct SettingsTmpl {
     pub localhost: bool,
     pub authed: bool,
     pub pw: String,
+    /// flash for the human-identity form: "name" | "duplicate"
+    pub human: String,
     pub gateway_token: String,
     pub bootstrap_token: String,
+    /// Human operator identities (kind=human peers) with their tokens.
+    pub humans: Vec<crate::state::Peer>,
 }
 
 pub async fn dashboard(State(app): State<AppState>) -> Response {
@@ -133,31 +180,46 @@ pub async fn dashboard(State(app): State<AppState>) -> Response {
     Html(t.render().unwrap_or_default()).into_response()
 }
 
-pub async fn peers_page(State(app): State<AppState>) -> Response {
-    let inner = app.inner.read().await;
+pub async fn peers_page(State(app): State<AppState>, Query(frag): Query<FragQuery>) -> Response {
+    let (pending, accepted, revoked) = {
+        let inner = app.inner.read().await;
+        (
+            inner
+                .peers
+                .iter()
+                .filter(|p| p.state == PeerState::Pending)
+                .cloned()
+                .collect(),
+            inner
+                .peers
+                .iter()
+                .filter(|p| p.state == PeerState::Accepted)
+                .cloned()
+                .collect(),
+            inner
+                .peers
+                .iter()
+                .filter(|p| p.state == PeerState::Revoked)
+                .cloned()
+                .collect(),
+        )
+    };
+    if frag.is_fragment() {
+        let t = PeersBodyTmpl {
+            pending,
+            accepted,
+            revoked,
+        };
+        return Html(t.render().unwrap_or_default()).into_response();
+    }
     let t = PeersTmpl {
         title: "Peers",
         active_nav: "peers",
         localhost: is_localhost(),
         authed: app.admin_set().await,
-        pending: inner
-            .peers
-            .iter()
-            .filter(|p| p.state == PeerState::Pending)
-            .cloned()
-            .collect(),
-        accepted: inner
-            .peers
-            .iter()
-            .filter(|p| p.state == PeerState::Accepted)
-            .cloned()
-            .collect(),
-        revoked: inner
-            .peers
-            .iter()
-            .filter(|p| p.state == PeerState::Revoked)
-            .cloned()
-            .collect(),
+        pending,
+        accepted,
+        revoked,
     };
     Html(t.render().unwrap_or_default()).into_response()
 }
@@ -185,9 +247,22 @@ pub async fn logs_page(State(app): State<AppState>) -> Response {
 /// on the caller/destination/method names and exact match on HTTP status.
 /// `errors=1` keeps status>=400 only. `n` caps rows (default 500, max 5000).
 pub async fn logs_full(State(app): State<AppState>, Query(q): Query<LogsQuery>) -> Response {
+    let fragment = q.is_fragment();
     let filters = LogFilters::from_query(q);
     let entries = filter_routing_log_spawn(&app, &filters).await;
     let total = entries.len() as u64;
+    if fragment {
+        let t = LogsTableTmpl {
+            entries,
+            q_src: filters.src.clone(),
+            q_dst: filters.dst.clone(),
+            q_status: filters.status.clone().unwrap_or_default(),
+            q_method: filters.method.clone(),
+            errors_only: filters.errors_only,
+            total,
+        };
+        return Html(t.render().unwrap_or_default()).into_response();
+    }
     let t = LogsTmpl {
         title: "Communication log",
         active_nav: "logs",
@@ -373,6 +448,7 @@ pub async fn peer_detail(
     Path(name): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    let fragment = q.get("fragment").map(|v| v == "1").unwrap_or(false);
     let peer = {
         let inner = app.inner.read().await;
         inner.peers.iter().find(|p| p.name == name).cloned()
@@ -428,6 +504,25 @@ pub async fn peer_detail(
     });
     let traffic_total = ok_count + err_count;
 
+    if fragment {
+        let t = PeerBodyTmpl {
+            peer,
+            channel: app.channels.has(&name),
+            registered_at,
+            last_seen,
+            capabilities,
+            skills,
+            card_pretty,
+            traffic,
+            traffic_total,
+            ok_count,
+            err_count,
+            dir: dir.to_string(),
+            full_log_query: format!("{}{}", if dir == "out" { "src=" } else { "dst=" }, name),
+        };
+        return Html(t.render().unwrap_or_default()).into_response();
+    }
+
     let t = PeerDetailTmpl {
         title: format!("Peer · {name}"),
         active_nav: "peers",
@@ -458,6 +553,25 @@ pub struct LogsQuery {
     pub method: Option<String>,
     pub errors: Option<String>,
     pub n: Option<usize>,
+    /// ?fragment=1 renders the live-update partial (no layout).
+    pub fragment: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct FragQuery {
+    pub fragment: Option<String>,
+}
+
+impl FragQuery {
+    fn is_fragment(&self) -> bool {
+        self.fragment.as_deref() == Some("1")
+    }
+}
+
+impl LogsQuery {
+    fn is_fragment(&self) -> bool {
+        self.fragment.as_deref() == Some("1")
+    }
 }
 
 /// Read the persistent routing log (routing.jsonl) — the full audit trail,
@@ -477,14 +591,22 @@ pub async fn settings_page(
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let inner = app.inner.read().await;
+    let humans: Vec<crate::state::Peer> = inner
+        .peers
+        .iter()
+        .filter(|p| p.kind == crate::state::PeerKind::Human)
+        .cloned()
+        .collect();
     let t = SettingsTmpl {
         title: "Settings",
         active_nav: "settings",
         localhost: is_localhost(),
         authed: app.admin_set().await,
         pw: q.get("pw").cloned().unwrap_or_default(),
+        human: q.get("human").cloned().unwrap_or_default(),
         gateway_token: inner.gateway_token.clone(),
         bootstrap_token: inner.bootstrap_token.clone(),
+        humans,
     };
     drop(inner);
     Html(t.render().unwrap_or_default()).into_response()
@@ -531,6 +653,7 @@ async fn set_state(app: &AppState, name: &str, state: PeerState) {
 
 pub async fn accept_peer(State(app): State<AppState>, Path(name): Path<String>) -> Redirect {
     set_state(&app, &name, PeerState::Accepted).await;
+    app.emit_peers("accept", &name);
     Redirect::to("/peers")
 }
 
@@ -543,11 +666,13 @@ pub async fn reject_peer(State(app): State<AppState>, Path(name): Path<String>) 
             .retain(|p| !(p.name == name && p.state == PeerState::Pending));
     }
     app.persist().await;
+    app.emit_peers("reject", &name);
     Redirect::to("/peers")
 }
 
 pub async fn revoke_peer(State(app): State<AppState>, Path(name): Path<String>) -> Redirect {
     set_state(&app, &name, PeerState::Revoked).await;
+    app.emit_peers("revoke", &name);
     Redirect::to("/peers")
 }
 
@@ -555,8 +680,12 @@ pub async fn delete_peer(State(app): State<AppState>, Path(name): Path<String>) 
     {
         let mut inner = app.inner.write().await;
         inner.peers.retain(|p| p.name != name);
+        for r in &mut inner.rooms {
+            r.members.retain(|m| m != &name);
+        }
     }
     app.persist().await;
+    app.emit_peers("delete", &name);
     Redirect::to("/peers")
 }
 
@@ -601,6 +730,8 @@ pub async fn sse_events(
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let session = crate::login::session_token(&headers);
     let rx = app.log_tx.subscribe();
+    let mut prx = app.peers_tx.subscribe();
+    let mut crx = app.chat_tx.subscribe();
     let stream = async_stream::try_stream! {
         let mut rx = rx;
         let mut last_check = std::time::Instant::now();
@@ -616,14 +747,27 @@ pub async fn sse_events(
                     break;
                 }
             }
-            match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
-                Ok(Ok(entry)) => {
-                    yield Event::default().event("route").data(serde_json::to_string(&entry).unwrap_or_default());
+            let ev = tokio::select! {
+                entry = rx.recv() => match entry {
+                    Ok(entry) => Event::default().event("route").data(serde_json::to_string(&entry).unwrap_or_default()),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                pe = prx.recv() => match pe {
+                    Ok(pe) => Event::default().event("peers").data(serde_json::to_string(&pe).unwrap_or_default()),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                cm = crx.recv() => match cm {
+                    Ok(cm) => Event::default().event("chat").data(serde_json::to_string(&cm).unwrap_or_default()),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                    Event::default().event("ping").data(now().to_string())
                 }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-                Err(_) => yield Event::default().event("ping").data(now().to_string()),
-            }
+            };
+            yield ev;
         }
     };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))

@@ -1,0 +1,75 @@
+{# Peer registry body — included by peers.html (parent context) and rendered
+   standalone by /peers?fragment=1 (PeersBodyTmpl). Vars here must exist in
+   BOTH structs: pending, accepted, revoked. #}
+{% if !pending.is_empty() %}
+<h2 id="pending">Pending approval</h2>
+<div class="tbl-wrap">
+<table class="tbl">
+  <thead><tr><th>Name</th><th>URL</th><th>Registered</th><th>Source IP</th><th></th></tr></thead>
+  <tbody>
+  {% for p in pending %}
+  <tr>
+    <td class="mono name" title="{{p.name}}"><a href="/peers/{{p.name}}">{{p.name}}</a></td><td class="mono url" title="{{p.url}}">{{p.url}}</td><td class="nw">{{p.registered_at_dt()}}</td><td class="mono">{{p.reg_ip_str()}}</td>
+    <td class="actions">
+      <form method="post" action="/peers/{{p.name}}/accept"><button class="btn btn-primary">Accept</button></form>
+      <form method="post" action="/peers/{{p.name}}/reject"><button class="btn">Reject</button></form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<h2>Accepted</h2>
+<div class="tbl-wrap">
+<table class="tbl">
+  <thead><tr><th>Name</th><th>URL</th><th>IP</th><th>Health</th><th>Last seen</th><th>Registered</th><th>Source</th><th></th></tr></thead>
+  <tbody>
+  {% for p in accepted %}
+  <tr>
+    <td class="mono name" title="{{p.name}}"><a href="/peers/{{p.name}}">{{p.name}}</a>{% if p.kind_str() == "human" %} <span class="pill-human">human</span>{% endif %}</td><td class="mono url" title="{{p.url}}">{% if p.kind_str() == "human" %}<span class="muted">operator identity</span>{% else %}{{p.url}}{% endif %}</td>
+    <td class="mono">{{p.last_ip_str()}}</td>
+    <td>{% if p.healthy == Some(true) %}<span class="ok">healthy</span>{% else %}<span class="bad">unreachable</span>{% endif %}</td>
+    <td class="nw">{{p.last_seen_dt()}}</td>
+    <td class="nw">{{p.registered_at_dt()}}</td>
+    <td>{% if p.auto_accepted %}bootstrap{% else %}manual{% endif %}</td>
+    <td class="actions">
+      <a class="btn" href="/chat?dm={{p.name}}">Chat</a>
+      <a class="btn" href="/peers/{{p.name}}">Details</a>
+      <details class="confirm">
+        <summary class="btn">Revoke</summary>
+        <div class="confirm-body"><span class="muted">Cut off this peer? Re-accept to restore.</span>
+        <form method="post" action="/peers/{{p.name}}/revoke"><button class="btn btn-danger">Confirm revoke</button></form></div>
+      </details>
+    </td>
+  </tr>
+  {% endfor %}
+  {% if accepted.is_empty() %}<tr><td colspan="8" class="empty">No accepted peers yet.</td></tr>{% endif %}
+  </tbody>
+</table>
+</div>
+
+{% if !revoked.is_empty() %}
+<h2>Revoked</h2>
+<div class="tbl-wrap">
+<table class="tbl">
+  <thead><tr><th>Name</th><th>URL</th><th></th></tr></thead>
+  <tbody>
+  {% for p in revoked %}
+  <tr>
+    <td class="mono name" title="{{p.name}}"><a href="/peers/{{p.name}}">{{p.name}}</a></td><td class="mono url" title="{{p.url}}">{{p.url}}</td>
+    <td class="actions">
+      <form method="post" action="/peers/{{p.name}}/accept"><button class="btn">Re-accept</button></form>
+      <details class="confirm">
+        <summary class="btn btn-danger">Delete</summary>
+        <div class="confirm-body"><span class="muted">Removes the peer permanently.</span>
+        <form method="post" action="/peers/{{p.name}}/delete"><button class="btn btn-danger">Delete permanently</button></form></div>
+      </details>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}

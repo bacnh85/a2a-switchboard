@@ -50,6 +50,11 @@ tokens, a directory, live routing logs, and a live topology view in one binary.
   set requires a localhost connection). Auth is off until a password is set;
   then all admin pages/APIs require a 12h session cookie. Peer/token endpoints
   are unaffected.
+- **Human peers & messenger** — create operator identities (name + token) in
+  Settings; chat Telegram-style in the web UI (`/chat`): DMs with any peer,
+  rooms with roster notifications, emoji picker, per-node colors, live SSE
+  appends. The gateway itself is an A2A agent (`/peer/gateway/`): message it
+  with `/help`, `/peers`, `/rooms`, `/whoami`.
 - **Zero-dep runtime** — rust-embed bakes the UI in; single 7MB static binary,
   no Node, no CDN, no database.
 
@@ -92,6 +97,22 @@ curl -X POST http://127.0.0.1:9920/register \
 
 Accept it at http://127.0.0.1:9920/peers. With the **bootstrap token** the same
 call returns `"state":"accepted"` immediately.
+
+### Talk to the gateway itself (human peer)
+
+Create a human identity in **Settings → Human operators** (e.g. `alice`),
+copy its token, then message the switchboard from any A2A client:
+
+```bash
+curl -X POST http://127.0.0.1:9920/peer/gateway/ \
+  -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send",
+       "params":{"message":{"role":"user","parts":[{"kind":"text","text":"/peers"}]}}}'
+```
+
+The same token reaches any peer (`/peer/<name>/`) and is attributed to
+`alice` in the routing log. In the web UI, open **Chat** for a Telegram-style
+messenger: DMs, rooms, emoji, live updates — as `alice`.
 
 ### Call a peer through the switchboard
 

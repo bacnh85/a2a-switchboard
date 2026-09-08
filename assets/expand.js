@@ -37,6 +37,10 @@
   function boot() {
     document.querySelectorAll('.tbl').forEach(init);
   }
+  // Rows swapped in by live.js need (re-)init; init is idempotent per table.
+  document.addEventListener('live:swap', function (e) {
+    if (e.detail && e.detail.querySelectorAll) e.detail.querySelectorAll('.tbl').forEach(init);
+  });
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
   } else {

@@ -1,0 +1,29 @@
+{# Audit table + caption — included by logs.html (parent context) and rendered
+   standalone by /logs/full?fragment=1 (LogsTableTmpl). The filter form stays
+   OUTSIDE this fragment so live swaps never yank a user's in-progress input.
+   Vars: entries, total, q_src, q_dst, q_method, q_status, errors_only. #}
+<div class="tbl-wrap">
+<table class="tbl">
+  <thead><tr><th>Time</th><th>Src</th><th>Dst</th><th>Method</th><th class="num">Status</th><th class="num">Bytes</th><th class="num">Ms</th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+  <tr class="log-row{% if e.status >= 400 %} log-row-err{% endif %}" tabindex="0" aria-expanded="false"{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %}{% if let Some(p) = e.resp_preview %} data-resp-preview="{{p}}"{% endif %}{% if let Some(s) = e.task_state %} data-task-state="{{s}}"{% endif %} data-method="{{e.method_display()}}" data-http="{{e.method}}" data-rpc-id="{% if let Some(id) = e.rpc_id %}{{id}}{% endif %}">
+    <td class="nw mono">{{e.ts_dt()}}</td>
+    <td class="mono">{{e.src}}</td>
+    <td class="mono">{{e.dst}}</td>
+    <td class="mono" title="HTTP {{e.method}}">{{e.method_display()}}</td>
+    <td class="num">{% if e.status >= 400 %}<span class="bad">{{e.status}}</span>{% else %}{{e.status}}{% endif %}</td>
+    <td class="num">{{e.bytes}}</td>
+    <td class="num">{{e.latency_ms}}</td>
+  </tr>
+  <tr class="log-detail" hidden><td colspan="7"></td></tr>
+  {% endfor %}
+  {% if entries.is_empty() %}<tr><td colspan="7" class="empty">No matching entries.</td></tr>{% endif %}
+  </tbody>
+</table>
+</div>
+{% if !q_src.is_empty() || !q_dst.is_empty() || !q_method.is_empty() || !q_status.is_empty() || errors_only %}
+<p class="muted">Showing {{total}} matching entries from <code>data/routing.jsonl</code>. <a href="/logs/full">Clear filters</a> to see the latest 500.</p>
+{% else %}
+<p class="muted">{{total}} entries (newest first). Live in-memory ring caps at 1000 — full history in <code>data/routing.jsonl</code>; filter or <a href="/logs/export?n=5000">export</a> to page through it.</p>
+{% endif %}

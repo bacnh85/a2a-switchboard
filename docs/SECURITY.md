@@ -20,6 +20,7 @@ code.
 | Gateway token | Register (→ pending), proxy through accepted peers, read directory |
 | Bootstrap token | Same as gateway + auto-accept on registration |
 | Peer caller token | Per-peer, minted at registration: proxy, **and manage its own peer** (PATCH / DELETE / re-register / channel-open). Never grants any other peer. |
+| Human peer token | Per-human, minted in Settings: proxy through accepted peers, message the built-in `gateway` agent. Never manages any peer, never callable. |
 
 - Both shared tokens are compared **in constant time** (`subtle` crate) — no timing oracle.
 - Tokens are stored plaintext in `state.json` (back it up as a secret) and
@@ -93,6 +94,11 @@ the operator (admin UI delete → re-register), never via a shared token.
 
 - Routing log (`routing.jsonl`) stores **metadata only**: ts, src, dst,
   method, status, bytes, latency. Never message bodies, never tokens.
+- **Chat log (`chat.jsonl`)** stores the messenger history **including chat
+  text** (cleartext, 0600, 16 MB rotation) — that is the feature. Captured
+  agent↔agent `message/send` traffic obeys `AGW_AUDIT_PREVIEWS=false` like
+  the audit previews; human/room/gateway messages are always stored. Back
+  up the data dir as sensitive.
 - Audit trail for the admin actions is in-process; no PII captured.
 
 ## Rate limits

@@ -1,0 +1,43 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="chat" id="chat">
+  <aside class="chat-list" aria-label="Conversations">
+    <div class="chat-list-head">
+      <h2 class="chat-h">Chats</h2>
+      <details class="room-new" id="room-new">
+        <summary class="btn btn-primary">New room</summary>
+        <form id="room-form" class="room-form">
+          <label for="room-name">Room name</label>
+          <input id="room-name" name="name" required maxlength="64" autocomplete="off">
+          <fieldset class="room-members"><legend class="muted">Members</legend>
+            <div id="room-member-list"></div>
+          </fieldset>
+          <button class="btn btn-primary" type="submit">Create room</button>
+        </form>
+      </details>
+    </div>
+    <div id="chat-convs" class="chat-convs"></div>
+  </aside>
+  <section class="chat-thread">
+    <header class="chat-head" id="chat-head">
+      <button class="btn btn-ghost chat-back" id="chat-back" hidden>&larr; Chats</button>
+      <div class="chat-head-id" id="chat-head-id">
+        <span class="muted">Pick a conversation</span>
+      </div>
+    </header>
+    <ol class="chat-msgs" id="chat-msgs" aria-live="polite"></ol>
+    <form class="chat-composer" id="composer">
+      <div class="cmd-pop" id="cmd-pop" aria-label="Commands" hidden></div>
+      <label class="muted" for="chat-as" id="chat-as-label">as</label>
+      <select id="chat-as" title="Chat as"></select>
+      <div class="emoji-wrap">
+        <button type="button" class="btn" id="emoji-btn" aria-label="Emoji" aria-expanded="false">☺</button>
+        <div class="emoji-pop" id="emoji-pop" hidden></div>
+      </div>
+      <textarea id="chat-input" rows="1" placeholder="Message…" maxlength="8000"></textarea>
+      <button class="btn btn-primary" type="submit" id="send-btn">Send</button>
+    </form>
+  </section>
+</div>
+<script src="/assets/messenger.js" defer></script>
+{% endblock %}

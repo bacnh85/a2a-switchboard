@@ -20,10 +20,13 @@
     var n = peers.length;
     var minRx = ((NODE_W + GAP) * Math.max(n, 1)) / (2 * Math.PI);
     var rx = Math.max(280, minRx);
-    var ry = Math.max(160, rx * 0.55);
+    // small peer counts: flat wide ellipse, half-step start angle so 2 peers
+    // sit left/right of the gateway instead of stacking vertically
+    var ry = Math.max(110, rx * (n <= 4 ? 0.4 : 0.55));
+    var a0 = -Math.PI / 2 + (n > 1 ? Math.PI / n : 0);
     var nodes = [{ id: 'gateway', x: 0, y: 0, w: GATE_W, h: GATE_H }];
     for (var i = 0; i < n; i++) {
-      var a = -Math.PI / 2 + (2 * Math.PI * i) / n;
+      var a = a0 + (2 * Math.PI * i) / n;
       nodes.push({
         id: peers[i].name, x: rx * Math.cos(a), y: ry * Math.sin(a),
         w: NODE_W, h: NODE_H, peer: peers[i]
@@ -98,7 +101,9 @@
     var gt = svgEl('text', { y: 5, class: 'topo-gate-label' });
     gt.textContent = '◈ gateway';
     gg.appendChild(gt);
-    fresh.appendChild(gg);
+    var gateLink = svgEl('a', { href: '/logs/full' });
+    gateLink.appendChild(gg);
+    fresh.appendChild(gateLink);
 
     // peer nodes
     state.peers.forEach(function (p) {
@@ -111,7 +116,8 @@
       g.appendChild(box);
       g.appendChild(svgEl('circle', { cx: -NODE_W / 2 + 15, cy: 0, r: 4, class: 'dot ' + dotClass(p) }));
       var t = svgEl('text', { x: 4, y: 4, class: 'topo-label' });
-      var label = p.name.length > 14 ? p.name.slice(0, 13) + '…' : p.name;
+      var max = p.channel ? 12 : 14;
+      var label = p.name.length > max ? p.name.slice(0, max - 1) + '…' : p.name;
       t.textContent = label + (p.channel ? ' ⛓' : '');
       g.appendChild(t);
       var c = state.counts[p.name] || 0;
@@ -123,7 +129,9 @@
       var title = svgEl('title');
       title.textContent = p.name + (p.channel ? ' (reverse channel)' : '') + ' — ' + c + ' routed';
       g.appendChild(title);
-      fresh.appendChild(g);
+      var link = svgEl('a', { href: '/peers/' + encodeURIComponent(p.name), class: 'topo-node-link' });
+      link.appendChild(g);
+      fresh.appendChild(link);
     });
 
     if (!state.peers.length) {
@@ -138,7 +146,10 @@
   }
 
   // --- flow animation: a packet traveling src→gate→dst (then back) ---
+  // SMIL is not affected by CSS prefers-reduced-motion; gate it here.
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function spawnPacket(pathD, delayMs, ok) {
+    if (reduceMotion) return;
     var circle = svgEl('circle', { r: 4, class: 'flow-packet' + (ok ? '' : ' flow-err') });
     var anim = svgEl('animateMotion', {
       dur: FLOW_STEP_MS + 'ms', begin: delayMs + 'ms', fill: 'freeze', path: pathD
@@ -199,7 +210,7 @@
       '<span class="flow-arrow">→</span>' +
       '<span class="flow-dst">' + esc(e.dst) + '</span>' +
       '<span class="flow-method">' + esc(e.rpc_method || e.method) + '</span>' +
-      '<span class="flow-status ' + (e.status >= 400 ? 'bad' : 'ok') + '">' + e.status + '</span>' +
+      '<span class="flow-status' + (e.status >= 400 ? ' bad' : '') + '">' + e.status + '</span>' +
       '<span class="flow-ms">' + e.latency_ms + 'ms</span>';
     var det = document.createElement('div');
     det.className = 'flow-detail';

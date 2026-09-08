@@ -16,10 +16,24 @@ pub enum PeerState {
     Revoked,
 }
 
+/// What a registered identity is. Agents are callable upstream A2A
+/// endpoints; humans are operator identities that call THROUGH the gateway
+/// (their caller_token is the credential shared with the gateway).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerKind {
+    #[default]
+    Agent,
+    Human,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
     pub name: String,
-    /// Pinned upstream A2A endpoint. The ONLY url the proxy will ever call (deny-by-default egress).
+    #[serde(default)]
+    pub kind: PeerKind,
+    /// Pinned upstream A2A endpoint. The ONLY url the proxy will ever call
+    /// (deny-by-default egress). Humans never proxy anywhere — sentinel value.
     pub url: String,
     /// Agent Card as submitted at registration, stored verbatim.
     pub card: serde_json::Value,
@@ -80,6 +94,12 @@ impl Peer {
             PeerState::Revoked => "revoked",
         }
     }
+    pub fn kind_str(&self) -> &'static str {
+        match self.kind {
+            PeerKind::Agent => "agent",
+            PeerKind::Human => "human",
+        }
+    }
     /// Short human summary of the agent card (first line of description).
     pub fn card_summary(&self) -> String {
         self.card
@@ -90,6 +110,52 @@ impl Peer {
     }
 }
 
+/// Chat room: a named group of peers + humans. Created from the admin UI;
+/// sends fan out to agent members as A2A message/send calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Room {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+    pub created_by: String,
+    pub created_at: i64,
+}
+
+impl Room {
+    pub fn created_at_dt(&self) -> String {
+        fmt_dt(self.created_at)
+    }
+}
+
+/// One messenger bubble. `conv` is "dm:<a>|<b>" (sorted name pair) or
+/// "room:<id>". Persisted to chat.jsonl + in-memory ring + SSE broadcast.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: u64,
+    pub ts: i64,
+    pub conv: String,
+    pub src: String,
+    pub text: String,
+    /// "chat" = participant bubble, "system" = roster/delivery events.
+    pub kind: String,
+    /// "ok" | "err"
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn ts_dt(&self) -> String {
+        fmt_dt(self.ts)
+    }
+    pub fn is_err(&self) -> bool {
+        self.status == "err"
+    }
+    pub fn is_system(&self) -> bool {
+        self.kind == "system"
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Persisted {
     gateway_token: String,
@@ -97,7 +163,17 @@ struct Persisted {
     #[serde(default)]
     peers: Vec<Peer>,
     #[serde(default)]
+    rooms: Vec<Room>,
+    #[serde(default)]
     admin: Option<AdminCred>,
+}
+
+/// Peer-registry/health change signal for the admin UI live updates
+/// (assets/live.js). kinds: register|accept|reject|revoke|delete|health.
+#[derive(Clone, serde::Serialize)]
+pub struct PeerEvent {
+    pub kind: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,6 +381,7 @@ pub struct Inner {
     pub gateway_token: String,
     pub bootstrap_token: String,
     pub peers: Vec<Peer>,
+    pub rooms: Vec<Room>,
     pub admin: Option<AdminCred>,
 }
 
@@ -364,6 +441,13 @@ pub struct App {
     pub inner: RwLock<Inner>,
     pub log_ring: RwLock<VecDeque<RouteEntry>>,
     pub log_tx: broadcast::Sender<RouteEntry>,
+    /// Registry/health flip signals for the live peers pages (SSE `peers`).
+    pub peers_tx: broadcast::Sender<PeerEvent>,
+    /// Messenger history: ring for the UI, chat.jsonl on disk, SSE `chat`.
+    pub chat_ring: RwLock<VecDeque<ChatMessage>>,
+    pub chat_tx: broadcast::Sender<ChatMessage>,
+    /// Monotonic chat message id (survives restart via chat.jsonl tail).
+    pub chat_seq: std::sync::atomic::AtomicU64,
     pub limiter: RateLimiter,
     pub http: reqwest::Client,
     /// Reverse channels: firewalled peers hold outbound SSE connections here.
@@ -380,6 +464,19 @@ pub struct App {
 /// routing.jsonl size cap before rotation (bytes). 0 disables the file log.
 /// Set once from config at startup (issue #5).
 pub static ROUTING_LOG_MAX_BYTES: std::sync::RwLock<u64> = std::sync::RwLock::new(64 * 1024 * 1024);
+
+/// Messenger ring cap (loaded bubbles) + chat.jsonl rotation cap.
+pub const CHAT_RING_CAP: usize = 2000;
+pub static CHAT_LOG_MAX_BYTES: std::sync::RwLock<u64> = std::sync::RwLock::new(16 * 1024 * 1024);
+
+/// Sorted dm conversation id for a name pair.
+pub fn dm_conv(a: &str, b: &str) -> String {
+    if a <= b {
+        format!("dm:{a}|{b}")
+    } else {
+        format!("dm:{b}|{a}")
+    }
+}
 
 /// When false, audit previews (redacted param snapshots) are dropped from
 /// the routing log — free-text parts can carry secrets key-name redaction
@@ -458,6 +555,7 @@ impl App {
                 gateway_token: p.gateway_token,
                 bootstrap_token: p.bootstrap_token,
                 peers: p.peers,
+                rooms: p.rooms,
                 admin: p.admin,
             }
         } else {
@@ -465,10 +563,32 @@ impl App {
                 gateway_token: gen_token(),
                 bootstrap_token: gen_token(),
                 peers: Vec::new(),
+                rooms: Vec::new(),
                 admin: None,
             }
         };
         let (log_tx, _) = broadcast::channel(256);
+        let (peers_tx, _) = broadcast::channel(64);
+        let (chat_tx, _) = broadcast::channel(64);
+        // Reload the messenger history: ring gets the tail, chat_seq stays
+        // monotonic via the MAX id across the whole file (ids may reset in
+        // files written before the newline fix).
+        let chat_all = read_chat_records(&data_dir);
+        // Empty file → first id is 0; continuing file → max + 1.
+        let chat_seq = chat_all
+            .iter()
+            .map(|m| m.id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        let chat_tail: Vec<ChatMessage> = chat_all
+            .into_iter()
+            .rev()
+            .take(CHAT_RING_CAP)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             // Never follow redirects: keeps egress pinned to the registered URL (SSRF guard).
@@ -479,6 +599,10 @@ impl App {
             inner: RwLock::new(inner),
             log_ring: RwLock::new(VecDeque::with_capacity(RING_CAP)),
             log_tx,
+            peers_tx,
+            chat_ring: RwLock::new(chat_tail.into_iter().collect()),
+            chat_tx,
+            chat_seq: std::sync::atomic::AtomicU64::new(chat_seq),
             limiter: RateLimiter::default(),
             http,
             channels: crate::channel::Channels::new(),
@@ -488,7 +612,7 @@ impl App {
         };
         // Tighten an existing state.json/routing.jsonl left world-readable by
         // an older build (issue #5).
-        for name in ["state.json", "routing.jsonl"] {
+        for name in ["state.json", "routing.jsonl", "chat.jsonl"] {
             let p = data_dir.join(name);
             if p.exists() {
                 restrict_perms(&p);
@@ -506,6 +630,7 @@ impl App {
             gateway_token: inner.gateway_token.clone(),
             bootstrap_token: inner.bootstrap_token.clone(),
             peers: inner.peers.clone(),
+            rooms: inner.rooms.clone(),
             admin: inner.admin.clone(),
         };
         drop(inner);
@@ -569,6 +694,66 @@ impl App {
         }
         ring.push_back(e.clone());
         let _ = self.log_tx.send(e);
+    }
+
+    /// Fire-and-forget registry/health signal for live admin UI updates.
+    /// Sync fn: broadcast send is non-blocking and never fails on a live bus.
+    /// Record one messenger bubble: assign id/ts, append to chat.jsonl,
+    /// push the ring, broadcast on the SSE chat channel. Returns the stored
+    /// message (with id) so handlers can echo it to the client.
+    pub async fn log_chat(&self, mut m: ChatMessage) -> ChatMessage {
+        if m.ts == 0 {
+            m.ts = now();
+        }
+        m.id = self
+            .chat_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut json) = serde_json::to_string(&m) {
+            // Newline-delimited: log_route does the same — without this the
+            // file is one giant line and read_chat_records can't parse it,
+            // losing all history (and chat_seq) on restart.
+            json.push('\n');
+            self.append_chat_log(&json);
+        }
+        {
+            let mut ring = self.chat_ring.write().await;
+            if ring.len() >= CHAT_RING_CAP {
+                ring.pop_front();
+            }
+            ring.push_back(m.clone());
+        }
+        let _ = self.chat_tx.send(m.clone());
+        m
+    }
+
+    /// Size-capped append to chat.jsonl, rotation like routing.jsonl.
+    fn append_chat_log(&self, line: &str) {
+        use std::io::Write;
+        let path = self.data_dir.join("chat.jsonl");
+        let cap = *CHAT_LOG_MAX_BYTES.read().unwrap();
+        if cap == 0 {
+            return;
+        }
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() + line.len() as u64 > cap {
+                let _ = std::fs::rename(&path, self.data_dir.join("chat.jsonl.1"));
+            }
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+        restrict_perms(&path);
+    }
+
+    pub fn emit_peers(&self, kind: &str, name: &str) {
+        let _ = self.peers_tx.send(PeerEvent {
+            kind: kind.to_string(),
+            name: name.to_string(),
+        });
     }
 
     pub async fn recent_log(&self, n: usize) -> Vec<RouteEntry> {
@@ -669,6 +854,19 @@ impl App {
     pub fn drop_session(&self, token: &str) {
         self.sessions.lock().unwrap().remove(token);
     }
+}
+
+/// Load chat.jsonl: ALL newline-delimited records, oldest first. Corrupt
+/// lines are skipped. (Pre-fix files may hold one giant concatenated line —
+/// repair tooling splits those; this loader only reads proper NDJSON.)
+fn read_chat_records(data_dir: &std::path::Path) -> Vec<ChatMessage> {
+    let path = data_dir.join("chat.jsonl");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .filter_map(|l| serde_json::from_str::<ChatMessage>(l).ok())
+        .collect()
 }
 
 fn hash_pw_legacy(salt: &str, pw: &str) -> String {

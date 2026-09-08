@@ -1,7 +1,10 @@
 use crate::auth::{
     classify_token, extract_token, forbidden, too_many, unauthorized, ClientIp, TokenKind,
 };
-use crate::state::{fingerprint, gen_token, now, validate_url, AppState, Peer, PeerState};
+use crate::state::{
+    dm_conv, fingerprint, gen_token, now, validate_url, AppState, ChatMessage, Peer, PeerKind,
+    PeerState,
+};
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
@@ -49,6 +52,13 @@ pub async fn register(
     };
 
     let name = reg.name.trim().to_string();
+    if name == "gateway" {
+        // Reserved: the built-in switchboard agent answers /peer/gateway/.
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "name 'gateway' is reserved for the switchboard agent",
+        );
+    }
     if name.is_empty()
         || name.len() > 64
         || !name
@@ -108,6 +118,7 @@ pub async fn register(
         inner.peers[idx] = peer;
         drop(inner);
         app.persist().await;
+        app.emit_peers("register", &name);
         let state_s = match real_state {
             PeerState::Pending => "pending",
             PeerState::Accepted => "accepted",
@@ -131,6 +142,7 @@ pub async fn register(
     };
     inner.peers.push(Peer {
         name: name.clone(),
+        kind: PeerKind::Agent,
         url: reg.url.clone(),
         card: reg.card.unwrap_or(serde_json::Value::Null),
         state,
@@ -147,6 +159,7 @@ pub async fn register(
     });
     drop(inner);
     app.persist().await;
+    app.emit_peers("register", &name);
     let s = if state == PeerState::Accepted {
         "accepted"
     } else {
@@ -386,27 +399,6 @@ pub fn may_manage(caller: &Caller, peer: &Peer, fp: &str) -> bool {
     }
 }
 
-/// Channel-path variant: per-peer token → name (no prefix); else header; else
-/// `channel-<label>` fallback so channel delivery stays visible.
-async fn caller_display_channel(
-    app: &AppState,
-    token: &str,
-    gw: &str,
-    boot: &str,
-    header: Option<&str>,
-) -> String {
-    if let Some(name) = peer_from_token(app, token).await {
-        return name;
-    }
-    match header
-        .map(str::trim)
-        .filter(|h| !h.is_empty() && h.len() <= 64)
-    {
-        Some(name) => name.to_string(),
-        None => format!("channel-{}", caller_label(token, gw, boot)),
-    }
-}
-
 /// Display-name attribution for the routing log: an `X-Gateway-Caller` header
 /// (e.g. pi-a2a's selfIdentity) when the caller provides one, else the stable
 /// fingerprint label. Advisory only — same trust level as the shared token.
@@ -416,6 +408,7 @@ async fn caller_display(
     gateway: &str,
     bootstrap: &str,
     header: Option<&str>,
+    channel_fallback: bool,
 ) -> String {
     // Highest confidence: a per-peer caller token identifies the peer exactly.
     if let Some(name) = peer_from_token(app, token).await {
@@ -426,6 +419,9 @@ async fn caller_display(
         .filter(|h| !h.is_empty() && h.len() <= 64)
     {
         Some(name) => name.to_string(),
+        // Channel-delivered calls from unattributed callers keep the
+        // `channel-` marker so they stay visible in the comm log.
+        None if channel_fallback => format!("channel-{}", caller_label(token, gateway, bootstrap)),
         None => caller_label(token, gateway, bootstrap),
     }
 }
@@ -457,30 +453,41 @@ pub async fn agent_card(
     // admission state); unauthenticated callers get an empty list (issue #5).
     let mut peers: Vec<serde_json::Value> = Vec::new();
     if authed {
-        peers = inner
-            .peers
-            .iter()
-            .filter(|p| p.state == PeerState::Accepted)
-            .map(|p| {
-                let mut v = serde_json::json!({
-                    "name": p.name,
-                    "url": format!("/peer/{}/", p.name),
-                    "healthy": p.healthy,
-                    "channel": app.channels.has(&p.name),
-                });
-                v["capabilities"] = p
-                    .card
-                    .get("capabilities")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                v["skills"] = p
-                    .card
-                    .get("skills")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                v
-            })
-            .collect();
+        // The built-in switchboard agent answers at /peer/gateway/.
+        peers.push(serde_json::json!({
+            "name": "gateway",
+            "url": "/peer/gateway/",
+            "healthy": true,
+            "channel": false,
+            "capabilities": { "streaming": false },
+            "skills": [],
+        }));
+        // Humans have no callable upstream endpoint — directory lists agents.
+        peers.extend(
+            inner
+                .peers
+                .iter()
+                .filter(|p| p.state == PeerState::Accepted && p.kind == PeerKind::Agent)
+                .map(|p| {
+                    let mut v = serde_json::json!({
+                        "name": p.name,
+                        "url": format!("/peer/{}/", p.name),
+                        "healthy": p.healthy,
+                        "channel": app.channels.has(&p.name),
+                    });
+                    v["capabilities"] = p
+                        .card
+                        .get("capabilities")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    v["skills"] = p
+                        .card
+                        .get("skills")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    v
+                }),
+        );
     }
 
     Json(serde_json::json!({
@@ -499,7 +506,368 @@ pub async fn agent_card(
     .into_response()
 }
 
-/// ANY /peer/{name}/{*rest} — reverse proxy to the peer's pinned URL (deny-by-default egress).
+/// Delivered response plus the buffered body (mirrored inside the response)
+/// so internal callers (chat fanout) can extract reply text.
+pub(crate) struct Delivered {
+    pub resp: Response,
+    pub body: Option<Vec<u8>>,
+}
+
+/// Core dual-mode delivery: the reverse-channel envelope when the peer holds
+/// one, direct pinned-URL HTTP otherwise. The single RouteEntry choke point
+/// for both; when `record_chat` is set and the call is an A2A message/send,
+/// the exchange is mirrored into the messenger store as DM bubbles.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn deliver(
+    app: &AppState,
+    name: &str,
+    token: &str,
+    client_ip: &str,
+    path: &str,
+    query: Option<String>,
+    method: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+    record_chat: bool,
+) -> Delivered {
+    let (url, upstream_token) = {
+        let inner = app.inner.read().await;
+        match inner.peers.iter().find(|p| p.name == name) {
+            Some(p) => (p.url.clone(), p.upstream_token.clone()),
+            None => {
+                return Delivered {
+                    resp: err(StatusCode::NOT_FOUND, "unknown peer"),
+                    body: None,
+                }
+            }
+        }
+    };
+    // Admission applies to internal sends exactly like proxy traffic.
+    let accepted = {
+        let inner = app.inner.read().await;
+        inner
+            .peers
+            .iter()
+            .find(|p| p.name == name)
+            .is_some_and(|p| p.state == PeerState::Accepted)
+    };
+    if !accepted {
+        return Delivered {
+            resp: forbidden(),
+            body: None,
+        };
+    }
+
+    let (gateway, bootstrap) = {
+        let inner = app.inner.read().await;
+        (inner.gateway_token.clone(), inner.bootstrap_token.clone())
+    };
+    // Dual-mode: firewalled peers hold a reverse channel — deliver there.
+    let via_channel = app.channels.has(name);
+    let src = caller_display(
+        app,
+        token,
+        &gateway,
+        &bootstrap,
+        headers
+            .get("x-gateway-caller")
+            .and_then(|v| v.to_str().ok()),
+        via_channel,
+    )
+    .await;
+    let audit = crate::state::audit_extract(&body);
+    let started = std::time::Instant::now();
+
+    let (status, resp, resp_bytes) = if via_channel {
+        channel_exchange(app, name, path, query, method, headers, body.clone()).await
+    } else {
+        direct_exchange(
+            app,
+            name,
+            &url,
+            upstream_token,
+            client_ip,
+            path,
+            query,
+            method,
+            headers,
+            body.clone(),
+        )
+        .await
+    };
+
+    let (task_state, resp_preview) = match &resp_bytes {
+        Some(b) => crate::state::audit_extract_response(b),
+        None => (None, None),
+    };
+    app.log_route(crate::state::RouteEntry {
+        ts: now(),
+        src: src.clone(),
+        dst: name.to_string(),
+        method: method.to_string(),
+        status,
+        bytes: body.len() as u64,
+        latency_ms: started.elapsed().as_millis() as u64,
+        rpc_method: audit.rpc_method.clone(),
+        rpc_id: audit.rpc_id,
+        preview: audit.preview,
+        resp_preview,
+        task_state,
+    })
+    .await;
+    record_chat_roundtrip(
+        app,
+        record_chat,
+        &src,
+        name,
+        audit.rpc_method.as_deref(),
+        &body,
+        resp_bytes.as_deref(),
+        status,
+    )
+    .await;
+    Delivered {
+        resp,
+        body: resp_bytes,
+    }
+}
+
+/// Direct pinned-URL HTTP exchange. Marks peer health/last_seen like the old
+/// inline proxy path. Returns (http status, response, buffered body).
+#[allow(clippy::too_many_arguments)]
+async fn direct_exchange(
+    app: &AppState,
+    name: &str,
+    url: &str,
+    upstream_token: Option<String>,
+    client_ip: &str,
+    path: &str,
+    query: Option<String>,
+    method: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> (u16, Response, Option<Vec<u8>>) {
+    // /peer/{name}/{rest} → {pinned-url}/{rest}; query string preserved.
+    let target = format!(
+        "{}{}{}",
+        url.trim_end_matches('/'),
+        path,
+        query.map(|q| format!("?{q}")).unwrap_or_default()
+    );
+    let mut req = app
+        .http
+        .request(
+            reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+            &target,
+        )
+        .timeout(PROXY_TIMEOUT);
+    if let Some(ut) = upstream_token {
+        req = req.bearer_auth(ut);
+    }
+    const SKIP: [&str; 7] = [
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "upgrade",
+        "authorization",
+        "x-gateway-token",
+        "x-gateway-caller",
+    ];
+    for (k, v) in headers.iter() {
+        let lower = k.as_str().to_lowercase();
+        if SKIP.contains(&lower.as_str()) || lower == "host" || lower == "content-length" {
+            continue;
+        }
+        if let Ok(vs) = v.to_str() {
+            req = req.header(&lower, vs);
+        }
+    }
+    if !body.is_empty() {
+        req = req.body(body);
+    }
+
+    match req.send().await {
+        Ok(upstream) => {
+            let status = upstream.status();
+            let mut resp_headers = axum::http::HeaderMap::new();
+            for (k, v) in upstream.headers().iter() {
+                let lower = k.as_str().to_lowercase();
+                if lower == "transfer-encoding"
+                    || lower == "content-length"
+                    || lower == "connection"
+                    || lower == "set-cookie"
+                    || lower == "www-authenticate"
+                {
+                    continue;
+                }
+                if let (Ok(hn), Ok(Ok(hv))) = (
+                    axum::http::HeaderName::from_bytes(lower.as_bytes()),
+                    v.to_str().map(axum::http::HeaderValue::from_str),
+                ) {
+                    resp_headers.insert(hn, hv);
+                }
+            }
+            let bytes = upstream.bytes().await.unwrap_or_default();
+            // Mark healthy + last_seen + last_ip on any successful exchange.
+            let mut inner = app.inner.write().await;
+            if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
+                p.last_seen = Some(now());
+                p.last_ip = Some(client_ip.to_string());
+                if p.healthy != Some(true) {
+                    p.healthy = Some(true);
+                    p.last_error = None;
+                }
+            }
+            drop(inner);
+            let code = StatusCode::from_u16(status.as_u16()).unwrap();
+            (
+                status.as_u16(),
+                (code, resp_headers, bytes.clone()).into_response(),
+                Some(bytes.to_vec()),
+            )
+        }
+        Err(e) => {
+            let mut inner = app.inner.write().await;
+            if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
+                p.healthy = Some(false);
+                p.last_error = Some(format!("proxy: {e}"));
+            }
+            drop(inner);
+            (
+                502,
+                err(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("upstream unreachable: {e}"),
+                ),
+                None,
+            )
+        }
+    }
+}
+
+/// Channel-mode exchange: wrap the request as an envelope, push it down the
+/// peer's own outbound SSE stream, await the correlated response POST.
+#[allow(clippy::too_many_arguments)]
+async fn channel_exchange(
+    app: &AppState,
+    name: &str,
+    path: &str,
+    query: Option<String>,
+    method: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> (u16, Response, Option<Vec<u8>>) {
+    use base64::Engine as _;
+    const SKIP: [&str; 7] = [
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "upgrade",
+        "authorization",
+        "x-gateway-token",
+        "x-gateway-caller",
+    ];
+    let mut fwd = std::collections::HashMap::new();
+    for (k, v) in headers.iter() {
+        let lower = k.as_str().to_lowercase();
+        if SKIP.contains(&lower.as_str()) || lower == "host" || lower == "content-length" {
+            continue;
+        }
+        if let Ok(vs) = v.to_str() {
+            fwd.insert(lower, vs.to_string());
+        }
+    }
+    let head = crate::channel::EnvelopeHead {
+        method: method.to_string(),
+        path: path.to_string(),
+        query,
+        headers: fwd,
+        body_b64: base64::engine::general_purpose::STANDARD.encode(&body),
+    };
+    if let Some(rx) = app.channels.deliver(name, head) {
+        match tokio::time::timeout(PROXY_TIMEOUT, rx).await {
+            Ok(Ok(resp)) => {
+                let status = resp.status;
+                let (r, b) = decode_channel_resp(resp);
+                (status, r, Some(b))
+            }
+            Ok(Err(_)) => (
+                502,
+                err(StatusCode::BAD_GATEWAY, "peer channel closed"),
+                None,
+            ),
+            Err(_) => (
+                504,
+                err(StatusCode::GATEWAY_TIMEOUT, "peer channel timeout"),
+                None,
+            ),
+        }
+    } else {
+        (
+            502,
+            err(StatusCode::BAD_GATEWAY, "peer channel send failed"),
+            None,
+        )
+    }
+}
+
+/// Mirror an A2A message/send exchange into the messenger store as DM
+/// bubbles (request from src, reply from dst). Captured traffic obeys
+/// PREVIEW_ENABLED like the audit previews; failures keep the request
+/// bubble with an error status and no reply.
+#[allow(clippy::too_many_arguments)]
+async fn record_chat_roundtrip(
+    app: &AppState,
+    enabled: bool,
+    src: &str,
+    dst: &str,
+    rpc_method: Option<&str>,
+    req_body: &[u8],
+    resp_body: Option<&[u8]>,
+    http_status: u16,
+) {
+    if !enabled
+        || !crate::chat::is_message_send(rpc_method)
+        || !*crate::state::PREVIEW_ENABLED.read().unwrap()
+    {
+        return;
+    }
+    let Some(text) = crate::chat::chat_text_request(req_body) else {
+        return;
+    };
+    let conv = dm_conv(src, dst);
+    let ok = http_status < 400;
+    app.log_chat(ChatMessage {
+        id: 0,
+        ts: 0,
+        conv: conv.clone(),
+        src: src.to_string(),
+        text,
+        kind: "chat".into(),
+        status: if ok { "ok" } else { "err" }.into(),
+        error: (!ok).then(|| format!("HTTP {http_status}")),
+    })
+    .await;
+    if let Some(rb) = resp_body {
+        if let Some(reply) = crate::chat::chat_text_response(rb) {
+            app.log_chat(ChatMessage {
+                id: 0,
+                ts: 0,
+                conv,
+                src: dst.to_string(),
+                text: reply,
+                kind: "chat".into(),
+                status: "ok".into(),
+                error: None,
+            })
+            .await;
+        }
+    }
+}
+
+/// ANY /peer/{name}/{*rest} — reverse proxy to the peer's pinned URL
+/// (deny-by-default egress). The reserved name `gateway` is answered by the
+/// built-in switchboard agent instead of being proxied.
 #[allow(clippy::too_many_arguments)]
 pub async fn proxy(
     State(app): State<AppState>,
@@ -532,278 +900,31 @@ pub async fn proxy(
     if !authorized_token(&app, &token, &gateway, &bootstrap).await {
         return unauthorized();
     }
-
-    let (url, upstream_token, state) = {
-        let inner = app.inner.read().await;
-        match inner.peers.iter().find(|p| p.name == name) {
-            Some(p) => (p.url.clone(), p.upstream_token.clone(), p.state),
-            None => return err(StatusCode::NOT_FOUND, "unknown peer"),
-        }
-    };
-    if state != PeerState::Accepted {
-        return forbidden();
+    // Built-in switchboard agent: talk to the gateway itself.
+    if name == "gateway" {
+        return crate::chat::gateway_agent(State(app), headers, body).await;
     }
     if body.len() > MAX_PROXY_BYTES {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
     }
-
-    // Dual-mode: firewalled peers hold a reverse channel — deliver there.
-    if app.channels.has(&name) {
-        return channel_roundtrip(app, name, token, uri, method, headers, body).await;
-    }
-
-    // /peer/{name}/{rest} → {pinned-url}/{rest}; query string preserved.
     let rest_path = match uri.path().strip_prefix(&format!("/peer/{name}")) {
         Some(r) if !r.is_empty() => r.to_string(),
         _ => "/".to_string(),
     };
-    let target = format!(
-        "{}{}{}",
-        url.trim_end_matches('/'),
-        rest_path,
-        uri.query().map(|q| format!("?{q}")).unwrap_or_default()
-    );
-
-    let src = caller_display(
+    deliver(
         &app,
+        &name,
         &token,
-        &gateway,
-        &bootstrap,
-        headers
-            .get("x-gateway-caller")
-            .and_then(|v| v.to_str().ok()),
+        &client_ip,
+        &rest_path,
+        uri.query().map(|q| q.to_string()),
+        method.as_str(),
+        &headers,
+        body,
+        true,
     )
-    .await;
-    let started = std::time::Instant::now();
-    let method_s = method.to_string();
-    let audit = crate::state::audit_extract(&body);
-
-    let mut req = app
-        .http
-        .request(
-            reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
-            &target,
-        )
-        .timeout(PROXY_TIMEOUT);
-    if let Some(ut) = upstream_token {
-        req = req.bearer_auth(ut);
-    }
-    const SKIP: [&str; 7] = [
-        "connection",
-        "keep-alive",
-        "transfer-encoding",
-        "upgrade",
-        "authorization",
-        "x-gateway-token",
-        "x-gateway-caller",
-    ];
-    for (k, v) in headers.iter() {
-        let lower = k.as_str().to_lowercase();
-        if SKIP.contains(&lower.as_str()) || lower == "host" || lower == "content-length" {
-            continue;
-        }
-        if let Ok(vs) = v.to_str() {
-            req = req.header(&lower, vs);
-        }
-    }
-    let body_len = body.len();
-    if !body.is_empty() {
-        req = req.body(body);
-    }
-
-    let resp = req.send().await;
-
-    match resp {
-        Ok(upstream) => {
-            let status = upstream.status();
-            let mut headers = axum::http::HeaderMap::new();
-            for (k, v) in upstream.headers().iter() {
-                let lower = k.as_str().to_lowercase();
-                if lower == "transfer-encoding"
-                    || lower == "content-length"
-                    || lower == "connection"
-                    || lower == "set-cookie"
-                    || lower == "www-authenticate"
-                {
-                    continue;
-                }
-                if let (Ok(hn), Ok(Ok(hv))) = (
-                    axum::http::HeaderName::from_bytes(lower.as_bytes()),
-                    v.to_str().map(axum::http::HeaderValue::from_str),
-                ) {
-                    headers.insert(hn, hv);
-                }
-            }
-            let bytes = upstream.bytes().await.unwrap_or_default();
-            // Response-side audit from the buffered body (JSON-RPC only —
-            // non-JSON bodies yield nothing; see audit_extract_response).
-            let (task_state, resp_preview) = crate::state::audit_extract_response(&bytes);
-            app.log_route(crate::state::RouteEntry {
-                ts: now(),
-                src: src.clone(),
-                dst: name.clone(),
-                method: method_s.clone(),
-                status: status.as_u16(),
-                bytes: body_len as u64,
-                latency_ms: started.elapsed().as_millis() as u64,
-                rpc_method: audit.rpc_method,
-                rpc_id: audit.rpc_id,
-                preview: audit.preview,
-                resp_preview,
-                task_state,
-            })
-            .await;
-            // Mark healthy + last_seen + last_ip on any successful exchange.
-            let mut inner = app.inner.write().await;
-            if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
-                p.last_seen = Some(now());
-                p.last_ip = Some(client_ip.clone());
-                if p.healthy != Some(true) {
-                    p.healthy = Some(true);
-                    p.last_error = None;
-                }
-            }
-            drop(inner);
-            (
-                StatusCode::from_u16(status.as_u16()).unwrap(),
-                headers,
-                bytes,
-            )
-                .into_response()
-        }
-        Err(e) => {
-            app.log_route(crate::state::RouteEntry {
-                ts: now(),
-                src,
-                dst: name.clone(),
-                method: method_s,
-                status: 502,
-                bytes: body_len as u64,
-                latency_ms: started.elapsed().as_millis() as u64,
-                rpc_method: audit.rpc_method,
-                rpc_id: audit.rpc_id,
-                preview: audit.preview,
-                resp_preview: None,
-                task_state: None,
-            })
-            .await;
-            let mut inner = app.inner.write().await;
-            if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
-                p.healthy = Some(false);
-                p.last_error = Some(format!("proxy: {e}"));
-            }
-            drop(inner);
-            err(
-                StatusCode::BAD_GATEWAY,
-                &format!("upstream unreachable: {e}"),
-            )
-        }
-    }
-}
-
-/// Channel-mode proxying: wrap the request as an envelope, push it down the
-/// peer's own outbound SSE stream, await the correlated response POST.
-async fn channel_roundtrip(
-    app: AppState,
-    name: String,
-    token: String,
-    uri: Uri,
-    method: axum::http::Method,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    use base64::Engine as _;
-    let rest = match uri.path().strip_prefix(&format!("/peer/{name}")) {
-        Some(r) if !r.is_empty() => r.to_string(),
-        _ => "/".to_string(),
-    };
-    const SKIP: [&str; 7] = [
-        "connection",
-        "keep-alive",
-        "transfer-encoding",
-        "upgrade",
-        "authorization",
-        "x-gateway-token",
-        "x-gateway-caller",
-    ];
-    let mut fwd = std::collections::HashMap::new();
-    for (k, v) in headers.iter() {
-        let lower = k.as_str().to_lowercase();
-        if SKIP.contains(&lower.as_str()) || lower == "host" || lower == "content-length" {
-            continue;
-        }
-        if let Ok(vs) = v.to_str() {
-            fwd.insert(lower, vs.to_string());
-        }
-    }
-    let head = crate::channel::EnvelopeHead {
-        method: method.to_string(),
-        path: rest,
-        query: uri.query().map(|q| q.to_string()),
-        headers: fwd,
-        body_b64: base64::engine::general_purpose::STANDARD.encode(&body),
-    };
-    let (gateway_t, bootstrap_t) = {
-        let inner = app.inner.read().await;
-        (inner.gateway_token.clone(), inner.bootstrap_token.clone())
-    };
-    let src = caller_display_channel(
-        &app,
-        &token,
-        &gateway_t,
-        &bootstrap_t,
-        headers
-            .get("x-gateway-caller")
-            .and_then(|v| v.to_str().ok()),
-    )
-    .await;
-    let started = std::time::Instant::now();
-    let method_s = method.to_string();
-    let audit = crate::state::audit_extract(&body);
-    let status;
-    // Buffered response bytes for response-side audit (None on channel errors).
-    let mut resp_bytes: Option<Vec<u8>> = None;
-    let out = if let Some(rx) = app.channels.deliver(&name, head) {
-        match tokio::time::timeout(PROXY_TIMEOUT, rx).await {
-            Ok(Ok(resp)) => {
-                status = resp.status;
-                let (r, b) = decode_channel_resp(resp);
-                resp_bytes = Some(b);
-                r
-            }
-            Ok(Err(_)) => {
-                status = 502;
-                err(StatusCode::BAD_GATEWAY, "peer channel closed")
-            }
-            Err(_) => {
-                status = 504;
-                err(StatusCode::GATEWAY_TIMEOUT, "peer channel timeout")
-            }
-        }
-    } else {
-        status = 502;
-        err(StatusCode::BAD_GATEWAY, "peer channel send failed")
-    };
-    let (task_state, resp_preview) = match &resp_bytes {
-        Some(b) => crate::state::audit_extract_response(b),
-        None => (None, None),
-    };
-    app.log_route(crate::state::RouteEntry {
-        ts: now(),
-        src,
-        dst: name,
-        method: method_s,
-        status,
-        bytes: body.len() as u64,
-        latency_ms: started.elapsed().as_millis() as u64,
-        rpc_method: audit.rpc_method,
-        rpc_id: audit.rpc_id,
-        preview: audit.preview,
-        resp_preview,
-        task_state,
-    })
-    .await;
-    out
+    .await
+    .resp
 }
 
 /// Decode a channel response into an axum Response with the same header

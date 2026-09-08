@@ -112,7 +112,14 @@ async fn admission_flow() {
         .unwrap();
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(card["peers"][0]["name"], "alpha");
+    let names: Vec<&str> = card["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"gateway"), "self-entry listed");
+    assert!(names.contains(&"alpha"));
 
     // 7. Revoked → hidden + 403 again
     let _ = router
@@ -133,7 +140,14 @@ async fn admission_flow() {
         .unwrap();
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(card["peers"].as_array().unwrap().len(), 0);
+    // Only the gateway self-entry remains (alpha is revoked and hidden).
+    let names: Vec<&str> = card["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["gateway"]);
 }
 
 #[tokio::test]
@@ -2011,9 +2025,10 @@ async fn unauth_directory_hides_fleet() {
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let peers = card["peers"].as_array().unwrap();
-    assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0]["name"], "d-peer");
-    assert!(peers[0].get("capabilities").is_some());
+    assert_eq!(peers.len(), 2, "gateway self-entry + the accepted peer");
+    assert_eq!(peers[0]["name"], "gateway");
+    assert_eq!(peers[1]["name"], "d-peer");
+    assert!(peers[1].get("capabilities").is_some());
 
     // peer caller token: directory visible too (authorized_token now accepts
     // caller tokens for the directory, issue #5)
@@ -2024,7 +2039,11 @@ async fn unauth_directory_hides_fleet() {
         .unwrap();
     let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
     let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(card["peers"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        card["peers"].as_array().unwrap().len(),
+        2,
+        "gateway + d-peer"
+    );
 }
 
 #[tokio::test]
@@ -2561,4 +2580,1189 @@ async fn old_format_routing_log_still_parses_with_new_fields_absent() {
     let e = entry.unwrap();
     assert!(e.resp_preview.is_none());
     assert!(e.task_state.is_none());
+}
+
+// --- live admin UI: peers SSE events + ?fragment=1 partials ---
+
+#[tokio::test]
+async fn peers_sse_event_on_register_and_accept() {
+    let (router, app, gw, _boot) = test_app().await;
+    let mut rx = app.peers_tx.subscribe();
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"live","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    let ev = rx.recv().await.unwrap();
+    assert_eq!((ev.kind.as_str(), ev.name.as_str()), ("register", "live"));
+    let _ = router
+        .clone()
+        .oneshot(form_req("POST", "/peers/live/accept", ""))
+        .await
+        .unwrap();
+    let ev = rx.recv().await.unwrap();
+    assert_eq!((ev.kind.as_str(), ev.name.as_str()), ("accept", "live"));
+}
+
+#[tokio::test]
+async fn health_flip_emits_single_event() {
+    let fake = axum::Router::new().route("/", axum::routing::post(|| async { "ok" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+    let mut rx = app.peers_tx.subscribe();
+
+    // First observation: was None (fresh registration) → flip = exactly 1 event.
+    a2a_switchboard::health::apply_health(&app, "fake", true, None).await;
+    assert_eq!(rx.try_recv().unwrap().kind, "health");
+    // Same value again: no event — a stable fleet must not spam the stream.
+    a2a_switchboard::health::apply_health(&app, "fake", true, None).await;
+    assert!(rx.try_recv().is_err());
+    // Flip to unhealthy: exactly one more.
+    a2a_switchboard::health::apply_health(&app, "fake", false, Some("probe: HTTP 500".into()))
+        .await;
+    assert_eq!(rx.try_recv().unwrap().kind, "health");
+}
+
+#[tokio::test]
+async fn fragments_require_admin_and_render() {
+    let fake = axum::Router::new().route("/", axum::routing::post(|| async { "ok" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+
+    // Admin unset → UI open: fragments render as bare partials (no layout).
+    for path in [
+        "/peers?fragment=1",
+        "/peers/fake?fragment=1",
+        "/logs/full?fragment=1",
+    ] {
+        let r = router
+            .clone()
+            .oneshot(req("GET", path, None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "{path}");
+        let body =
+            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
+                .into_owned();
+        assert!(!body.contains("<!DOCTYPE"), "{path} leaked layout");
+        assert!(!body.contains("<nav"), "{path} leaked layout");
+    }
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peers?fragment=1", None, None))
+        .await
+        .unwrap();
+    let body =
+        String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
+            .into_owned();
+    assert!(body.contains("Accepted"));
+
+    // Admin set → locks; fragments follow the same admin gate as full pages.
+    let pw = app.ensure_admin_password().await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peers?fragment=1", None, None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert_eq!(r.headers().get("location").unwrap(), "/login");
+
+    let r = router
+        .clone()
+        .oneshot(form_req("POST", "/login", &format!("password={pw}")))
+        .await
+        .unwrap();
+    let cookie = cookie_of(&r).unwrap();
+    for path in [
+        "/peers?fragment=1",
+        "/peers/fake?fragment=1",
+        "/logs/full?fragment=1",
+    ] {
+        let r = router
+            .clone()
+            .oneshot(req("GET", path, None, None).with_header("cookie", &cookie))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "{path}");
+        let body =
+            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
+                .into_owned();
+        assert!(!body.contains("<!DOCTYPE"), "{path} leaked layout");
+    }
+    // Pages carry the live-update wiring.
+    for path in ["/peers", "/logs/full"] {
+        let r = router
+            .clone()
+            .oneshot(req("GET", path, None, None).with_header("cookie", &cookie))
+            .await
+            .unwrap();
+        let body =
+            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
+                .into_owned();
+        assert!(body.contains("data-live"), "{path} missing data-live");
+        assert!(body.contains("/assets/live.js"), "{path} missing live.js");
+    }
+    // Caption renders exactly once (page includes the partial; no dupes).
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/logs/full", None, None).with_header("cookie", &cookie))
+        .await
+        .unwrap();
+    let body =
+        String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
+            .into_owned();
+    assert_eq!(body.matches("entries (newest first)").count(), 1);
+    assert_eq!(body.matches("matching entries from").count(), 0);
+}
+
+#[tokio::test]
+async fn logs_fragment_honors_filters() {
+    let (router, app, _gw, _boot) = test_app().await;
+    for (src, dst) in [("alice", "w1"), ("bob", "w2")] {
+        app.log_route(a2a_switchboard::state::RouteEntry {
+            ts: a2a_switchboard::state::now(),
+            src: src.into(),
+            dst: dst.into(),
+            method: "POST".into(),
+            status: 200,
+            bytes: 0,
+            latency_ms: 1,
+            rpc_method: None,
+            rpc_id: None,
+            preview: None,
+            resp_preview: None,
+            task_state: None,
+        })
+        .await;
+    }
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/logs/full?src=alice&fragment=1", None, None))
+        .await
+        .unwrap();
+    let body =
+        String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
+            .into_owned();
+    assert!(body.contains("alice"));
+    assert!(!body.contains("bob"), "fragment ignored the src filter");
+}
+
+// ----- human peers, gateway agent, chat / messenger -----
+
+fn json_req(method: &str, uri: &str, body: &str) -> Request<Body> {
+    req(method, uri, None, Some(body))
+}
+
+async fn body_json(r: axum::response::Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// Register + auto-accept an upstream peer that records request bodies and
+/// replies with an A2A artifact text "roger".
+async fn spawn_recording_peer(
+    received: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> (String, String, String) {
+    let recv = received.clone();
+    let fake = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let recv = recv.clone();
+            async move {
+                recv.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).to_string());
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "jsonrpc":"2.0","id":1,
+                        "result":{"id":"t1","status":{"state":"completed"},
+                                  "artifacts":[{"parts":[{"kind":"text","text":"roger"}]}]}
+                    })),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    let gw = "gw_test_token".to_string();
+    let boot = "boot_test_token".to_string();
+    (format!("http://{addr}/"), gw, boot)
+}
+
+#[tokio::test]
+async fn human_peer_lifecycle_and_attribution() {
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (url, _gw, boot) = spawn_recording_peer(received).await;
+    let (router, app, _gw2, boot2) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot2),
+            Some(&format!(r#"{{"name":"fake","url":"{url}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+
+    // Create a human identity via the Settings form.
+    let r = router
+        .clone()
+        .oneshot(form_req("POST", "/settings/humans", "name=alice"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let alice_token = {
+        let inner = app.inner.read().await;
+        let p = inner
+            .peers
+            .iter()
+            .find(|p| p.name == "alice")
+            .unwrap()
+            .clone();
+        assert_eq!(p.kind, a2a_switchboard::state::PeerKind::Human);
+        assert_eq!(p.state, PeerState::Accepted);
+        p.caller_token.unwrap()
+    };
+
+    // The human token calls a peer through the gateway; attribution = alice.
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/fake",
+            Some(&alice_token),
+            Some(r#"{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hello fake"}]}}}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let log = app.recent_log(10).await;
+    assert_eq!(log[0].src, "alice");
+    assert_eq!(log[0].dst, "fake");
+
+    // The messenger store mirrored the exchange as DM bubbles.
+    {
+        let ring = app.chat_ring.read().await;
+        let conv = a2a_switchboard::state::dm_conv("alice", "fake");
+        let msgs: Vec<_> = ring.iter().filter(|m| m.conv == conv).collect();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].src, "alice");
+        assert!(msgs[0].text.contains("hello fake"));
+        assert_eq!(msgs[1].src, "fake");
+        assert_eq!(msgs[1].text, "roger");
+    }
+
+    // Humans are excluded from the directory; the gateway agent is listed.
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/.well-known/agent.json", Some(&boot), None))
+        .await
+        .unwrap();
+    let card = body_json(r).await;
+    let names: Vec<&str> = card["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"gateway"));
+    assert!(names.contains(&"fake"));
+    assert!(!names.contains(&"alice"));
+}
+
+#[tokio::test]
+async fn gateway_agent_replies_and_records() {
+    let (router, app, _gw, boot) = test_app().await;
+
+    // Plain text → agent ack; command → fleet answer. Both are JSON-RPC
+    // message/send results and both land in the messenger store.
+    for (text, expect) in [("hello", "/help"), ("/peers", "No peers registered")] {
+        let body = serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"message/send",
+            "params":{"message":{"role":"user","parts":[{"kind":"text","text":text}]}}
+        });
+        let r = router
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/peer/gateway/",
+                Some(&boot),
+                Some(&body.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = body_json(r).await;
+        let reply = v["result"]["artifacts"][0]["parts"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(reply.contains(expect), "reply to {text} was: {reply}");
+        assert_eq!(v["result"]["status"]["state"], "completed");
+    }
+
+    {
+        let ring = app.chat_ring.read().await;
+        let conv = a2a_switchboard::state::dm_conv("bootstrap", "gateway");
+        let msgs: Vec<_> = ring.iter().filter(|m| m.conv == conv).collect();
+        assert_eq!(msgs.len(), 4, "two exchanges = request + reply bubbles");
+        assert_eq!(msgs[0].src, "bootstrap");
+        assert_eq!(msgs[1].src, "gateway");
+    }
+    // Routing log shows the gateway-agent calls.
+    let log = app.recent_log(10).await;
+    assert_eq!(log[0].dst, "gateway");
+    assert_eq!(log[0].src, "bootstrap");
+}
+
+#[tokio::test]
+async fn gateway_agent_accepts_v1_0_send_message() {
+    // A2A v1.0 clients (e.g. pi-a2a) call the method `SendMessage`, not the
+    // pre-1.0 alias — the gateway agent must accept both.
+    let (router, app, _gw, boot) = test_app().await;
+    let body = serde_json::json!({
+        "jsonrpc":"2.0","id":9,"method":"SendMessage",
+        "params":{"message":{"role":"user","parts":[{"kind":"text","text":"/whoami"}]}}
+    });
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/gateway/",
+            Some(&boot),
+            Some(&body.to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    assert_eq!(v["result"]["kind"], "task");
+    let reply = v["result"]["artifacts"][0]["parts"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(reply.contains("bootstrap"), "whoami reply was: {reply}");
+    // v1.0 proxied traffic mirrors into the messenger too.
+    let ring = app.chat_ring.read().await;
+    let conv = a2a_switchboard::state::dm_conv("bootstrap", "gateway");
+    assert!(ring.iter().any(|m| m.conv == conv && m.src == "gateway"));
+}
+
+#[tokio::test]
+async fn proxied_send_message_v1_0_mirrors_to_chat() {
+    // Proxied SendMessage (v1.0) exchanges must mirror request + reply DM
+    // bubbles exactly like the pre-1.0 alias (record_chat_roundtrip gate).
+    let fake = axum::Router::new()
+        .route(
+            "/",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "jsonrpc":"2.0","id":1,
+                        "result":{"kind":"task","status":{"state":"completed"},
+                                  "artifacts":[{"parts":[{"kind":"text","text":"fake reply"}]}]}
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/.well-known/agent-card.json",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"name":"fake"})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"fake","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+
+    let body = serde_json::json!({
+        "jsonrpc":"2.0","id":2,"method":"SendMessage",
+        "params":{"message":{"role":"user","kind":"message","messageId":"m1",
+                             "parts":[{"kind":"text","text":"v1 hello"}]}}
+    });
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/fake",
+            Some(&boot),
+            Some(&body.to_string()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let ring = app.chat_ring.read().await;
+    let conv = a2a_switchboard::state::dm_conv("bootstrap", "fake");
+    let msgs: Vec<_> = ring.iter().filter(|m| m.conv == conv).collect();
+    assert_eq!(msgs.len(), 2, "request + reply bubbles: {msgs:?}");
+    assert!(msgs[0].text.contains("v1 hello"), "was: {}", msgs[0].text);
+    assert!(msgs[1].text.contains("fake reply"), "was: {}", msgs[1].text);
+}
+
+#[tokio::test]
+async fn chat_endpoints_require_admin_session() {
+    // With an admin password set, chat APIs must not be reachable without a
+    // session (regression guard: all other chat tests run password-less).
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = app.set_admin_password(None, "test-pw-123").await;
+    let session = app.create_session();
+
+    // Cookie-less chat API POST → 401.
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/chat/send",
+            Some(&boot),
+            Some(r#"{"conv":"dm:a|b","text":"hi"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    // Non-API form POST (human creation) → redirect to login.
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/settings/humans",
+            Some(&boot),
+            Some("name=tester"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+
+    // A valid admin session passes.
+    let r = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/chat/state")
+                .header("cookie", format!("agw_session={session}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn room_create_rate_limited() {
+    // Room creation rewrites state per call — bound it like the other chat
+    // mutations (30/min per client IP).
+    let (router, _app, _gw, _boot) = test_app().await;
+    let mut last = StatusCode::OK;
+    for i in 0..35 {
+        let r = router
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat/rooms",
+                None,
+                Some(&format!(r#"{{"name":"rate-room-{i}"}}"#)),
+            ))
+            .await
+            .unwrap();
+        last = r.status();
+        if i < 30 {
+            assert_ne!(last, StatusCode::TOO_MANY_REQUESTS, "request {i} limited");
+        }
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[test]
+fn chat_text_response_unwraps_v1_0_task() {
+    use a2a_switchboard::chat::chat_text_response;
+    // v1.0 wrapper: {"task": {artifacts, status}} — what pi-a2a returns.
+    let wrapped = r#"{"jsonrpc":"2.0","id":1,"result":{"task":{"status":{"state":"completed"},
+        "artifacts":[{"parts":[{"kind":"text","text":"wrapped reply"}]}]}}}"#;
+    assert_eq!(
+        chat_text_response(wrapped.as_bytes()).as_deref(),
+        Some("wrapped reply")
+    );
+    // Bare message result: parts directly on the result object.
+    let msg = r#"{"result":{"kind":"message","parts":[{"kind":"text","text":"hi"}]}}"#;
+    assert_eq!(chat_text_response(msg.as_bytes()).as_deref(), Some("hi"));
+    // Pre-1.0 flat shape still extracts.
+    let flat = r#"{"result":{"artifacts":[{"parts":[{"kind":"text","text":"flat"}]}]}}"#;
+    assert_eq!(chat_text_response(flat.as_bytes()).as_deref(), Some("flat"));
+}
+
+#[tokio::test]
+async fn room_send_requires_sender_membership() {
+    // `as` cannot attribute a room message to a human who isn't a member
+    // (mirrors the DM conv-participant contract).
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (url, _gw, _boot) = spawn_recording_peer(received).await;
+    let (router, _app, _gw2, boot2) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot2),
+            Some(&format!(r#"{{"name":"bob","url":"{url}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+    for h in ["alice", "mallory"] {
+        let _ = router
+            .clone()
+            .oneshot(form_req("POST", "/settings/humans", &format!("name={h}")))
+            .await
+            .unwrap();
+    }
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/rooms",
+            r#"{"name":"ops","members":["bob"],"as":"alice"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let room_id = body_json(r).await["room"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Creator is auto-membered — alice speaks fine…
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            &serde_json::json!({"conv": format!("room:{room_id}"), "as": "alice", "text": "hi"})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // …but a non-member human is rejected before any fanout.
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            &serde_json::json!({"conv": format!("room:{room_id}"), "as": "mallory", "text": "hi"})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn chat_text_cap_counts_characters_not_bytes() {
+    // The composer caps characters (maxlength=8000) — the server must count
+    // the same way, or an 8000-char CJK/emoji message is rejected 413.
+    let (router, _app, _gw, _boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(form_req("POST", "/settings/humans", "name=alice"))
+        .await
+        .unwrap();
+    let cjk = |n: usize| "あ".repeat(n);
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            &serde_json::json!({"conv": "dm:alice|gateway", "as": "alice", "text": cjk(8000)})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            &serde_json::json!({"conv": "dm:alice|gateway", "as": "alice", "text": cjk(8001)})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn admin_created_room_without_identity_send_flow() {
+    // resolve_human never yields "admin": with no accepted human it rejects
+    // earlier ("no such human identity"); once one exists, as-less sends
+    // attribute to the first human and the membership check applies.
+    let (router, _app, _gw, _boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(json_req("POST", "/api/chat/rooms", r#"{"name":"ops"}"#))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let room_id = body_json(r).await["room"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // No humans yet → clean rejection before the membership check.
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            &serde_json::json!({"conv": format!("room:{room_id}"), "text": "hi"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v = body_json(r).await;
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("no such human identity"));
+
+    // A human appears but isn't a member → membership check rejects.
+    let _ = router
+        .clone()
+        .oneshot(form_req("POST", "/settings/humans", "name=alice"))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            &serde_json::json!({"conv": format!("room:{room_id}"), "text": "hi"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v = body_json(r).await;
+    assert!(v["error"].as_str().unwrap().contains("not a member"));
+
+    // Once alice joins, the as-less send attributes to her and passes.
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            &format!("/api/chat/rooms/{room_id}/members"),
+            r#"{"add":["alice"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            &serde_json::json!({"conv": format!("room:{room_id}"), "text": "hi"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn reserved_gateway_name_rejected() {
+    let (router, _app, gw, _boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"gateway","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn room_create_notifies_and_fans_out() {
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (url, _gw, boot) = spawn_recording_peer(received.clone()).await;
+    let (router, app, _gw2, boot2) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot2),
+            Some(&format!(r#"{{"name":"bob","url":"{url}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+
+    // Human identity + room with bob as member.
+    let _ = router
+        .clone()
+        .oneshot(form_req("POST", "/settings/humans", "name=alice"))
+        .await
+        .unwrap();
+    let alice_token = {
+        let inner = app.inner.read().await;
+        inner
+            .peers
+            .iter()
+            .find(|p| p.name == "alice")
+            .unwrap()
+            .caller_token
+            .clone()
+            .unwrap()
+    };
+
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/rooms",
+            &serde_json::json!({"name":"ops","members":["bob"],"as":"alice"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    let room_id = v["room"]["id"].as_str().unwrap().to_string();
+    assert!(!room_id.is_empty());
+
+    // Roster notification reached the agent member.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let got = received.lock().unwrap().clone();
+    assert!(
+        got.iter()
+            .any(|b| b.contains("You were added to room 'ops'")),
+        "roster notify missing; got: {got:?}"
+    );
+
+    // Room send fans out to bob with room context and records his reply.
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            &serde_json::json!({
+                "conv": format!("room:{room_id}"),
+                "as": "alice",
+                "text": "team sync 🚀"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    let msgs = v["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["src"], "alice");
+    assert_eq!(msgs[0]["text"], "team sync 🚀");
+
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let got = received.lock().unwrap().clone();
+    assert!(
+        got.iter().any(|b| b.contains("[ops] alice: team sync")),
+        "fanout text missing; got: {got:?}"
+    );
+
+    {
+        let ring = app.chat_ring.read().await;
+        let conv = format!("room:{room_id}");
+        let room_msgs: Vec<_> = ring.iter().filter(|m| m.conv == conv).collect();
+        assert!(room_msgs
+            .iter()
+            .any(|m| m.kind == "system" && m.text.contains("Room 'ops' created")));
+        assert!(room_msgs
+            .iter()
+            .any(|m| m.src == "bob" && m.text == "roger"));
+    }
+
+    // The chat API serves the thread back (emoji intact).
+    let r = router
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/api/chat/messages?conv=room%3A{room_id}"),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    let texts: Vec<String> = v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["text"].as_str().unwrap().to_string())
+        .collect();
+    assert!(texts.iter().any(|t| t.contains("team sync 🚀")));
+
+    // The human token also lets external A2A clients reach the gateway agent.
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/gateway/",
+            Some(&alice_token),
+            Some(r#"{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"/whoami"}]}}}"#),
+        ))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    let reply = v["result"]["artifacts"][0]["parts"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(reply.contains("alice"), "whoami reply was: {reply}");
+
+    let _ = boot; // silence unused in some cfgs
+}
+
+#[tokio::test]
+async fn human_name_gateway_reserved() {
+    let (router, app, _gw, _boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(form_req("POST", "/settings/humans", "name=gateway"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let inner = app.inner.read().await;
+    assert!(inner.peers.iter().all(|p| p.name != "gateway"));
+}
+
+#[tokio::test]
+async fn dm_send_failure_still_stored() {
+    let (router, app, _gw, _boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(form_req("POST", "/settings/humans", "name=alice"))
+        .await
+        .unwrap();
+
+    // Unknown target: the human's message must be stored (✗) — never lost.
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            r#"{"conv":"dm:alice|ghost","as":"alice","text":"anyone there?"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    let msgs = v["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["src"], "alice");
+    assert_eq!(msgs[0]["status"], "err");
+    assert!(msgs[0]["error"].as_str().unwrap().contains("404"));
+
+    let ring = app.chat_ring.read().await;
+    let conv = a2a_switchboard::state::dm_conv("alice", "ghost");
+    let stored: Vec<_> = ring.iter().filter(|m| m.conv == conv).collect();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].text, "anyone there?");
+}
+
+#[tokio::test]
+async fn dm_send_stored_with_previews_disabled() {
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (url, _gw, _boot) = spawn_recording_peer(received).await;
+    let (router, _app, _gw2, boot2) = test_app().await;
+    // Panic-safe restore: the global static must not leak false to other
+    // preview-asserting tests even if an assertion below fails.
+    struct RestorePreview;
+    impl Drop for RestorePreview {
+        fn drop(&mut self) {
+            *a2a_switchboard::state::PREVIEW_ENABLED.write().unwrap() = true;
+        }
+    }
+    let _guard = RestorePreview;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot2),
+            Some(&format!(r#"{{"name":"fake","url":"{url}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+    let _ = router
+        .clone()
+        .oneshot(form_req("POST", "/settings/humans", "name=alice"))
+        .await
+        .unwrap();
+
+    *a2a_switchboard::state::PREVIEW_ENABLED.write().unwrap() = false;
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/send",
+            r#"{"conv":"dm:alice|fake","as":"alice","text":"hello with previews off"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    let msgs = v["messages"].as_array().unwrap();
+    // Human conversation is the feature — stored even with previews off.
+    assert!(msgs
+        .iter()
+        .any(|m| m["src"] == "alice" && m["status"] == "ok"));
+    assert!(msgs
+        .iter()
+        .any(|m| m["src"] == "fake" && m["text"] == "roger"));
+}
+
+#[tokio::test]
+async fn room_members_add_remove_and_notify() {
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (url, _gw, _boot) = spawn_recording_peer(received.clone()).await;
+    let (router, app, _gw2, boot2) = test_app().await;
+    for n in ["bob", "carol"] {
+        let _ = router
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/register",
+                Some(&boot2),
+                Some(&format!(r#"{{"name":"{n}","url":"{url}/"}}"#)),
+            ))
+            .await
+            .unwrap();
+    }
+    let _ = router
+        .clone()
+        .oneshot(form_req("POST", "/settings/humans", "name=alice"))
+        .await
+        .unwrap();
+
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            "/api/chat/rooms",
+            r#"{"name":"ops","members":["bob"],"as":"alice"}"#,
+        ))
+        .await
+        .unwrap();
+    let room_id = body_json(r).await["room"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Add carol: roster notify to carol + system bubble + roster updated.
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            &format!("/api/chat/rooms/{room_id}/members"),
+            r#"{"add":["carol"],"as":"alice"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let got = received.lock().unwrap().clone();
+    assert!(got
+        .iter()
+        .any(|b| b.contains("You were added to room 'ops'")));
+    {
+        let ring = app.chat_ring.read().await;
+        let conv = format!("room:{room_id}");
+        assert!(ring
+            .iter()
+            .any(|m| m.conv == conv && m.kind == "system" && m.text.contains("alice added carol")));
+    }
+
+    // Remove bob: system bubble + roster updated (persisted).
+    let r = router
+        .clone()
+        .oneshot(json_req(
+            "POST",
+            &format!("/api/chat/rooms/{room_id}/members"),
+            r#"{"remove":["bob"],"as":"alice"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let inner = app.inner.read().await;
+    let room = inner.rooms.iter().find(|r| r.id == room_id).unwrap();
+    // bob removed; alice stays (creator is always a member).
+    assert_eq!(room.members, vec!["alice".to_string(), "carol".to_string()]);
+}
+
+#[tokio::test]
+async fn gateway_agent_hides_fleet_from_pending() {
+    // Names/health are admission state (issue #5): a pending peer's
+    // caller_token must not enumerate the fleet via the gateway agent.
+    let (router, _app, gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"alpha","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(r#"{"name":"pending1","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    let ptok = body_json(r).await["caller_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for cmd in ["/peers", "/rooms"] {
+        let body = serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"message/send",
+            "params":{"message":{"role":"user","parts":[{"kind":"text","text":cmd}]}}
+        });
+        let r = router
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/peer/gateway/",
+                Some(&ptok),
+                Some(&body.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = body_json(r).await;
+        let reply = v["result"]["artifacts"][0]["parts"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            !reply.contains("alpha"),
+            "{cmd} leaked the fleet to a pending peer: {reply}"
+        );
+        assert!(reply.contains("accepted peers only"), "reply was: {reply}");
+    }
+
+    // Roster side: an accepted caller's /peers lists accepted agents only —
+    // pending names stay hidden (same disclosure as agent_card).
+    let body = serde_json::json!({
+        "jsonrpc":"2.0","id":1,"method":"message/send",
+        "params":{"message":{"role":"user","parts":[{"kind":"text","text":"/peers"}]}}
+    });
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/gateway/",
+            Some(&boot),
+            Some(&body.to_string()),
+        ))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    let reply = v["result"]["artifacts"][0]["parts"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reply.contains("alpha"));
+    assert!(
+        !reply.contains("pending1"),
+        "roster leaked a pending peer: {reply}"
+    );
+}
+
+#[tokio::test]
+async fn chat_log_is_newline_delimited() {
+    // Regression: log_chat once wrote records without '\n', producing one
+    // concatenated line that read_chat_records couldn't parse — history (and
+    // chat_seq) was lost on every restart, resetting ids to 0 (which then
+    // broke the client's data-mid dedupe → duplicate bubbles).
+    let (router, app, gw, _boot) = test_app().await;
+    for text in ["first", "second"] {
+        let body = serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"message/send",
+            "params":{"message":{"role":"user","parts":[{"kind":"text","text":text}]}}
+        });
+        let r = router
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/peer/gateway/",
+                Some(&gw),
+                Some(&body.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+    let raw = std::fs::read_to_string(app.data_dir.join("chat.jsonl")).unwrap();
+    let lines: Vec<_> = raw.lines().collect();
+    assert_eq!(lines.len(), 4, "one record per line");
+    for l in &lines {
+        let parsed: a2a_switchboard::state::ChatMessage = serde_json::from_str(l).unwrap();
+        assert!(parsed.id < 4);
+    }
+    // Restart round-trip: seq continues from the file's max id.
+    let app2 = a2a_switchboard::state::App::load(app.data_dir.clone())
+        .await
+        .unwrap();
+    assert_eq!(app2.chat_seq.load(std::sync::atomic::Ordering::Relaxed), 4);
 }

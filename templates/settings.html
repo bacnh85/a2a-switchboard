@@ -1,7 +1,7 @@
 {% extends "layout.html" %}
 {% block content %}
 <h1>Settings</h1>
-{% if pw == "ok" %}<div class="banner" role="status">Password saved.</div>{% endif %}
+{% if pw == "ok" %}<div class="banner banner-ok" role="status">Password saved.</div>{% endif %}
 {% if pw == "mismatch" %}<div class="banner banner-warn" role="alert">New password and confirmation do not match.</div>{% endif %}
 {% if pw == "error" %}<div class="banner banner-warn" role="alert">Could not save password — check the current password and that the new one is at least 8 characters.</div>{% endif %}
 <section class="card">
@@ -21,16 +21,96 @@
   </form>
 </section>
 <section class="card">
+  <h2>Human operators</h2>
+  <p>Identities for people: each gets a token (shared with this gateway) for calling peers and chatting — with the gateway agent, any peer, or a room — from any A2A client or the <a href="/chat">Chat</a> page.</p>
+  {% if human == "name" %}<div class="banner banner-warn" role="alert">Name must be 1-64 chars of [a-zA-Z0-9._-].</div>{% endif %}
+  {% if human == "duplicate" %}<div class="banner banner-warn" role="alert">That name is already registered.</div>{% endif %}
+  <form method="post" action="/settings/humans" class="human-form">
+    <label for="human-name">Name</label>
+    <input id="human-name" name="name" required maxlength="64" pattern="[a-zA-Z0-9._-]{1,64}" autocomplete="off">
+    <button class="btn btn-primary" type="submit">Create human peer</button>
+  </form>
+  {% if !humans.is_empty() %}
+  <div class="tbl-wrap">
+  <table class="tbl">
+    <thead><tr><th>Name</th><th>Token</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+    {% for h in humans %}
+    <tr>
+      <td class="mono name" title="{{h.name}}">{{h.name}}</td>
+      <td>{% if let Some(tok) = h.caller_token %}
+        <div class="token-row">
+          <code class="token" data-token="{{tok}}">••••••••••••••••</code>
+          <button class="btn" type="button" data-reveal>Reveal</button>
+          <button class="btn" type="button" data-copy>Copy</button>
+        </div>
+      {% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="nw">{{h.registered_at_dt()}}</td>
+      <td class="actions">
+        <details class="confirm">
+          <summary class="btn btn-danger">Delete</summary>
+          <div class="confirm-body"><span class="muted">Removes this identity; its token stops working.</span>
+          <form method="post" action="/settings/humans/{{h.name}}/delete"><button class="btn btn-danger">Confirm delete</button></form></div>
+        </details>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">No human identities yet.</p>{% endif %}
+</section>
+<section class="card">
   <h2>Gateway API token</h2>
   <p>Peers authenticate with this token. Registering with it puts them in the pending queue.</p>
-  <code class="token">{{gateway_token}}</code>
+  <div class="token-row">
+    <code class="token" data-token="{{gateway_token}}">••••••••••••••••</code>
+    <button class="btn" type="button" data-reveal>Reveal</button>
+    <button class="btn" type="button" data-copy>Copy</button>
+  </div>
 </section>
 <section class="card">
   <h2>Bootstrap token</h2>
   <p>Peers presenting this token at <code>/register</code> are accepted automatically. Keep it private or rotate it.</p>
-  <code class="token">{{bootstrap_token}}</code>
-  <form method="post" action="/settings/bootstrap/regenerate">
-    <button class="btn btn-danger">Regenerate bootstrap token</button>
-  </form>
+  <div class="token-row">
+    <code class="token" data-token="{{bootstrap_token}}">••••••••••••••••</code>
+    <button class="btn" type="button" data-reveal>Reveal</button>
+    <button class="btn" type="button" data-copy>Copy</button>
+  </div>
+  <details class="confirm">
+    <summary class="btn btn-danger">Regenerate bootstrap token</summary>
+    <div class="confirm-body"><span class="muted">Auto-accept stops until peers use the new token.</span>
+    <form method="post" action="/settings/bootstrap/regenerate"><button class="btn btn-danger">Confirm regenerate</button></form></div>
+  </details>
 </section>
+<script>
+(function () {
+  function copyText(t, ok, fail) {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(t).then(ok, fail);
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); ok(); } catch (e) { fail(); }
+      ta.remove();
+    }
+  }
+  document.querySelectorAll('.token-row').forEach(function (row) {
+    var code = row.querySelector('.token'), tok = code.dataset.token, shown = false;
+    var reveal = row.querySelector('[data-reveal]'), cp = row.querySelector('[data-copy]');
+    if (reveal) reveal.addEventListener('click', function () {
+      shown = !shown;
+      code.textContent = shown ? tok : '••••••••••••••••';
+      reveal.textContent = shown ? 'Hide' : 'Reveal';
+    });
+    if (cp) cp.addEventListener('click', function () {
+      copyText(tok, function () {
+        cp.textContent = 'Copied';
+        setTimeout(function () { cp.textContent = 'Copy'; }, 1500);
+      }, function () { cp.textContent = 'Select & copy manually'; });
+    });
+  });
+})();
+</script>
 {% endblock %}

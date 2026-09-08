@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod auth;
 pub mod channel;
+pub mod chat;
 pub mod config;
 pub mod health;
 pub mod login;
@@ -27,10 +28,21 @@ async fn asset(
                 Some("js") => "application/javascript",
                 _ => "application/octet-stream",
             };
-            ([(axum::http::header::CONTENT_TYPE, mime)], f.data)
+            // no-cache: embedded assets change on upgrade — never let the
+            // browser serve a stale console JS/CSS across deploys.
+            (
+                [
+                    (axum::http::header::CONTENT_TYPE, mime),
+                    (axum::http::header::CACHE_CONTROL, "no-cache"),
+                ],
+                f.data,
+            )
         }
         None => (
-            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            [
+                (axum::http::header::CONTENT_TYPE, "text/plain"),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+            ],
             std::borrow::Cow::Borrowed(&b"not found"[..]),
         ),
     }
@@ -48,6 +60,8 @@ pub fn router(app: Arc<App>) -> axum::Router {
         .route("/logs/export", get(admin::logs_export))
         .route("/settings", get(admin::settings_page))
         .route("/settings/password", post(admin::set_password))
+        .route("/settings/humans", post(chat::create_human))
+        .route("/settings/humans/{name}/delete", post(chat::delete_human))
         .route("/peers/{name}/accept", post(admin::accept_peer))
         .route("/peers/{name}/reject", post(admin::reject_peer))
         .route("/peers/{name}/revoke", post(admin::revoke_peer))
@@ -55,6 +69,15 @@ pub fn router(app: Arc<App>) -> axum::Router {
         .route(
             "/settings/bootstrap/regenerate",
             post(admin::regenerate_bootstrap),
+        )
+        .route("/chat", get(chat::chat_page))
+        .route("/api/chat/state", get(chat::api_state))
+        .route("/api/chat/messages", get(chat::api_messages))
+        .route("/api/chat/send", post(chat::api_send))
+        .route("/api/chat/rooms", post(chat::api_rooms_create))
+        .route(
+            "/api/chat/rooms/{id}/members",
+            post(chat::api_rooms_members),
         )
         .layer(middleware::from_fn_with_state(
             app.clone(),

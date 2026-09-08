@@ -27,6 +27,8 @@ src/
 │                 dual-mode proxy (direct HTTP | channel), deregister
 ├── channel.rs  — reverse channel: Channels registry (mpsc + per-conn secret),
 │                 /channel SSE, /channel/response, CleanupStream, size caps
+├── chat.rs     — messenger: built-in gateway agent, rooms, chat JSON API,
+│                 human peer forms; text extraction from A2A message/send
 ├── health.rs   — periodic probe; live channel = healthy
 └── admin.rs    — dashboard/peers/logs/graph/settings pages + SSE + actions
 templates/      — Askama compiled templates (inherits layout.html)

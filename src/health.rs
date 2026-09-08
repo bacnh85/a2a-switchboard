@@ -1,4 +1,4 @@
-use crate::state::{now, AppState, PeerState};
+use crate::state::{now, AppState, PeerKind, PeerState};
 
 /// Periodically probe each accepted peer's agent card; feed health + last_seen.
 pub fn spawn(app: AppState, interval_sec: u64) {
@@ -12,20 +12,15 @@ pub fn spawn(app: AppState, interval_sec: u64) {
                 .await
                 .peers
                 .iter()
-                .filter(|p| p.state == PeerState::Accepted)
+                // Humans have no upstream endpoint to probe.
+                .filter(|p| p.state == PeerState::Accepted && p.kind != PeerKind::Human)
                 .map(|p| (p.name.clone(), p.url.clone()))
                 .collect();
             for (name, base) in urls {
                 // Channel peers may be unreachable by URL by construction —
                 // a live channel IS the health signal.
                 if app.channels.has(&name) {
-                    let mut inner = app.inner.write().await;
-                    if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
-                        p.healthy = Some(true);
-                        p.last_seen = Some(now());
-                        p.last_error = None;
-                    }
-                    drop(inner);
+                    apply_health(&app, &name, true, None).await;
                     continue;
                 }
                 let target = format!("{}/.well-known/agent-card.json", base.trim_end_matches('/'));
@@ -37,12 +32,7 @@ pub fn spawn(app: AppState, interval_sec: u64) {
                     .await
                 {
                     Ok(r) if r.status().is_success() => {
-                        let mut inner = app.inner.write().await;
-                        if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
-                            p.healthy = Some(true);
-                            p.last_seen = Some(now());
-                            p.last_error = None;
-                        }
+                        apply_health(&app, &name, true, None).await;
                     }
                     Ok(r) => {
                         let msg = format!("probe: HTTP {}", r.status());
@@ -58,12 +48,33 @@ pub fn spawn(app: AppState, interval_sec: u64) {
     });
 }
 
-async fn set_unhealthy(app: &AppState, name: &str, msg: &str) {
-    let mut inner = app.inner.write().await;
-    if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
-        p.healthy = Some(false);
-        p.last_error = Some(msg.to_string());
+/// Set health + last_seen/last_error for one peer; emits a `peers` event only
+/// when `healthy` actually flips (probe writes run every tick — per-tick
+/// events would spam the SSE stream). pub for integration tests.
+pub async fn apply_health(app: &AppState, name: &str, ok: bool, err: Option<String>) {
+    // Probe writes run every heartbeat tick: emit a peers event only when the
+    // healthy value actually FLIPS, or a stable fleet spams the SSE stream.
+    let flipped = {
+        let mut inner = app.inner.write().await;
+        if let Some(p) = inner.peers.iter_mut().find(|p| p.name == name) {
+            let was = p.healthy;
+            p.healthy = Some(ok);
+            p.last_error = err;
+            if ok {
+                p.last_seen = Some(now());
+            }
+            was != Some(ok)
+        } else {
+            false
+        }
+    };
+    if flipped {
+        app.emit_peers("health", name);
     }
+}
+
+async fn set_unhealthy(app: &AppState, name: &str, msg: &str) {
+    apply_health(app, name, false, Some(msg.to_string())).await;
 }
 
 fn pe_msg_trunc(s: &str) -> String {

@@ -13,28 +13,9 @@
   <a class="btn" href="/logs/export?src={{q_src|urlencode}}&dst={{q_dst|urlencode}}&method={{q_method|urlencode}}&status={{q_status|urlencode}}{% if errors_only %}&errors=1{% endif %}&n=5000">Export JSONL</a>
 </form>
 
-<table class="tbl">
-  <thead><tr><th>time</th><th>src</th><th>dst</th><th>method</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>
-  <tbody>
-  {% for e in entries %}
-  <tr class="log-row{% if e.status >= 400 %} log-row-err{% endif %}" tabindex="0" aria-expanded="false"{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %}{% if let Some(p) = e.resp_preview %} data-resp-preview="{{p}}"{% endif %}{% if let Some(s) = e.task_state %} data-task-state="{{s}}"{% endif %} data-method="{{e.method_display()}}" data-http="{{e.method}}" data-rpc-id="{% if let Some(id) = e.rpc_id %}{{id}}{% endif %}">
-    <td>{{e.ts_dt()}}</td>
-    <td>{{e.src}}</td>
-    <td>{{e.dst}}</td>
-    <td class="mono" title="HTTP {{e.method}}">{{e.method_display()}}</td>
-    <td><span class="{% if e.status >= 400 %}bad{% else %}ok{% endif %}">{{e.status}}</span></td>
-    <td>{{e.bytes}}</td>
-    <td>{{e.latency_ms}}</td>
-  </tr>
-  <tr class="log-detail" hidden><td colspan="7"></td></tr>
-  {% endfor %}
-  {% if entries.is_empty() %}<tr><td colspan="7" class="empty">No matching entries.</td></tr>{% endif %}
-  </tbody>
-</table>
+<div class="tbl-wrap" data-live data-live-src="/logs/full?src={{q_src|urlencode}}&dst={{q_dst|urlencode}}&method={{q_method|urlencode}}&status={{q_status|urlencode}}{% if errors_only %}&errors=1{% endif %}&fragment=1" data-live-on="route">
+{% include "_logs_table.html" %}
+</div>
 <script src="/assets/expand.js"></script>
-{% if !q_src.is_empty() || !q_dst.is_empty() || !q_method.is_empty() || !q_status.is_empty() || errors_only %}
-<p class="muted">Showing {{total}} matching entries from <code>data/routing.jsonl</code>. <a href="/logs/full">Clear filters</a> to see the latest 500.</p>
-{% else %}
-<p class="muted">{{total}} entries (newest first). Live in-memory ring caps at 1000 — full history in <code>data/routing.jsonl</code>; filter or <a href="/logs/export?n=5000">export</a> to page through it.</p>
-{% endif %}
+<script src="/assets/live.js" defer></script>
 {% endblock %}

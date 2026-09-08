@@ -2,6 +2,88 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.1] - 2026-09-08
+
+### Changed
+
+- **Chat**: messenger-style typing indicator — a lone three-dot bubble
+  appears while the send request waits on an agent peer or room (cleared
+  when the reply lands, on delivery failure, or after 65s; static dots
+  under `prefers-reduced-motion`). Delivery ticks are now a tight
+  overlapping SVG double-check — the text `✓✓` glyph gap is gone.
+- **A2A v1.0 interop**: the gateway agent and the chat mirror now accept
+  the v1.0 `SendMessage` method alongside the pre-1.0 `message/send`
+  alias; gateway replies carry `kind: "task"`. Proxied v1.0 exchanges
+  mirror into the messenger like alias traffic.
+- **Chat hardening**: roster notifications are bounded by the same 60s
+  fanout timeout as room sends (a stalling agent can no longer pin
+  room-create/member-add); room creation is rate-limited (30/min per IP).
+- **Reply extraction**: peer replies wrapped as a v1.0 `{"task": …}` /
+  `{"message": …}` result (and bare message results) now mirror into chat —
+  previously only the flat pre-1.0 shape extracted, so modern clients'
+  room/DM replies showed as "(no reply)".
+- **Room dialog**: the "New room" dialog closes on outside click or Escape
+  (in addition to closing on successful create).
+
+## [0.7.0] - 2026-09-08
+
+### Added
+
+- **Human peers**: operator identities created in Settings (name → minted
+  token, shown with Reveal/Copy). Stored as `kind: human` peers —
+  auto-accepted, never probed, excluded from the directory. The token is a
+  per-peer caller token: it authenticates `/peer/*` calls and attributes
+  them to the human's name in the routing log.
+- **Gateway agent (talk to the switchboard itself)**: the reserved name
+  `gateway` is answered by a built-in zero-dep A2A agent at
+  `/peer/gateway/` — commands `/help`, `/peers`, `/rooms`, `/whoami`, and a
+  friendly ack otherwise. The name is now rejected at `/register`.
+  Directory-based clients discover it via a `gateway` self-entry in
+  `/.well-known/agent.json`.
+- **Messenger UI (`/chat`)**: Telegram-style two-pane chat — conversation
+  list (rooms + DMs with last-message previews), per-node identity colors
+  (8-color palette, stable by name hash), native-emoji composer with a
+  picker popover, delivery ticks, unread badges, live appends over a new
+  SSE `chat` event, mobile single-pane collapse. "Chat as" selector picks
+  the human identity; peers page links open `?dm=<name>`.
+- **Chat store**: `data/chat.jsonl` (append + 16 MB rotation, 0600) +
+  in-memory ring (2000) + SSE broadcast. Proxied `message/send` exchanges
+  are mirrored as DM bubbles (request text from `params.message.parts`,
+  reply text from `result.artifacts`); captured traffic honors
+  `AGW_AUDIT_PREVIEWS=false`, human/room/gateway messages are always kept.
+  State persists across restarts (rooms in `state.json`, ids via the
+  chat.jsonl tail).
+- **Rooms**: create from the UI with member picker; room sends fan out to
+  agent members concurrently (60 s per member) as `[room] sender: text`
+  message/send calls; member replies and delivery failures become bubbles;
+  roster changes notify added members and are recorded as system events.
+- New JSON API under the admin session: `GET /api/chat/state`,
+  `GET /api/chat/messages`, `POST /api/chat/send`, `POST /api/chat/rooms`,
+  `POST /api/chat/rooms/{id}/members`.
+
+### Changed
+
+- Directory (`/.well-known/agent.json`) lists the `gateway` self-entry for
+  authenticated callers; human peers are never listed.
+- Channel-delivered calls keep the `channel-` attribution marker only for
+  unattributed callers (same behavior as 0.6.x); attributed callers now
+  show their name on the channel path too.
+
+## [Unreleased]
+
+### Added
+
+- **Live admin UI for /peers, /logs/full, and peer detail**: registry changes
+  (register/accept/reject/revoke/delete) and health flips are broadcast on
+  the existing SSE stream as a new `peers` event (separate channel from
+  route events; flips only — a stable fleet emits nothing per heartbeat).
+  Pages ship server-rendered fragments (`?fragment=1`, same admin gate) that
+  a small vanilla client (`assets/live.js`) swaps in on SSE events plus a
+  30s drift poll — debounced, diff-checked (no-op when unchanged), and
+  skipped while the region holds focus or user-opened state (open
+  `<details>`, expanded rows). The filter form never swaps, so in-progress
+  inputs are never yanked. Dashboard live behavior is unchanged.
+
 ## [0.6.2] - 2026-09-02
 
 ### Added
