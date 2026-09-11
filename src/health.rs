@@ -60,6 +60,10 @@ pub async fn apply_health(app: &AppState, name: &str, ok: bool, err: Option<Stri
             let was = p.healthy;
             p.healthy = Some(ok);
             p.last_error = err;
+            p.last_probe_ts = Some(now());
+            if ok {
+                p.last_ok_ts = Some(now());
+            }
             if ok {
                 p.last_seen = Some(now());
             }

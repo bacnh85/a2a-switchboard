@@ -25,7 +25,7 @@
     if (!cell.textContent) {
       var lines = ['RPC: ' + (row.dataset.method || '') + ' (HTTP ' + (row.dataset.http || '') + ')'];
       if (row.dataset.rpcId) lines.push('id: ' + row.dataset.rpcId);
-      if (row.dataset.taskState) lines.push('task: ' + row.dataset.taskState);
+      if (row.dataset.taskState) lines.push('task: ' + row.dataset.taskState.replace('TASK_STATE_', '').toLowerCase());
       lines.push('request preview: ' + (row.dataset.preview || '—'));
       lines.push('response preview: ' + (row.dataset.respPreview || '—'));
       cell.textContent = lines.join('\n');

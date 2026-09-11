@@ -1,10 +1,11 @@
 {# Peer detail body — included by peer_detail.html (parent context) and
    rendered standalone by /peers/{name}?fragment=1 (PeerBodyTmpl). Vars:
-   peer, channel, registered_at, last_seen, capabilities, skills, card_pretty,
+   peer, channel, registered_at, last_seen, card_name, card_desc, card_version,
+   card_provider, cap_streaming, cap_push, cap_sth, skills, card_pretty,
    traffic, traffic_total, ok_count, err_count, dir, full_log_query. #}
 <div class="stats">
   <div class="stat"><span class="stat-key">{{peer.state_str()}}</span><span class="stat-label">state</span></div>
-  <div class="stat"><span class="stat-key {% if peer.healthy == Some(true) %}ok-text{% else %}bad-text{% endif %}">{% if peer.healthy == Some(true) %}healthy{% else %}unreachable{% endif %}</span><span class="stat-label">health</span></div>
+  <div class="stat"><span class="stat-key {% if peer.healthy == Some(true) %}ok-text{% else if peer.healthy == Some(false) %}bad-text{% else %}stat-dim{% endif %}">{% if peer.healthy == Some(true) %}healthy{% else if peer.healthy == Some(false) %}unreachable{% else %}unknown{% endif %}</span><span class="stat-label">health</span></div>
   <div class="stat"><span class="stat-num">{{traffic_total}}</span><span class="stat-label">routed ({{ok_count}} ok / {{err_count}} err)</span></div>
 </div>
 
@@ -14,36 +15,56 @@
     <tr><th>Name</th><td class="mono">{{peer.name}}</td></tr>
     <tr><th>Endpoint</th><td class="mono">{{peer.url}}</td></tr>
     <tr><th>State</th><td>{{peer.state_str()}}</td></tr>
-    <tr><th>Source</th><td>{% if peer.auto_accepted %}bootstrap{% else %}manual{% endif %}</td></tr>
-    <tr><th>Registered</th><td>{{registered_at}}</td></tr>
+    <tr><th>Admitted</th><td>{% if peer.auto_accepted %}bootstrap token{% else %}manual{% endif %}</td></tr>
+    <tr><th>Registered</th><td class="ts-rel" data-ts="{{peer.registered_at}}">{{registered_at}}</td></tr>
     <tr><th>Registered from IP</th><td class="mono">{{peer.reg_ip_str()}}</td></tr>
-    <tr><th>Last seen</th><td>{{last_seen}}{% if peer.last_seen.is_some() %} ({{peer.last_seen_dt()}}){% endif %}</td></tr>
+    <tr><th>Last seen</th><td class="ts-rel" data-ts="{% if let Some(t) = peer.last_seen %}{{t}}{% endif %}">{{last_seen}}</td></tr>
     <tr><th>Last IP</th><td class="mono">{{peer.last_ip_str()}}</td></tr>
     <tr><th>Last error</th><td class="mono">{% if let Some(e) = peer.last_error %}{{e}}{% else %}—{% endif %}</td></tr>
-    <tr><th>Reverse channel</th><td>{% if channel %}<span class="ok">active</span>{% else %}<span class="bad">no</span>{% endif %}</td></tr>
+    <tr><th>Reverse channel</th><td>{% if channel %}<span class="ok">active</span>{% else %}<span class="stat-dim">direct</span>{% endif %}</td></tr>
   </table>
 </section>
 
+{% if let Some(tok) = peer.caller_token %}
 <section class="card">
-  <h2>Agent card — capabilities</h2>
-  {% if capabilities == "null" %}
-  <p class="muted">Peer registered without a card (or without capabilities).</p>
-  {% else %}
-  <pre class="json">{{capabilities}}</pre>
-  {% endif %}
+  <h2>Gateway identity</h2>
+  <p class="muted">Token this peer presents to call through the gateway — its calls are attributed as “{{peer.name}}” in the log.</p>
+  <div class="token-row">
+    <code class="token" data-token="{{tok}}">••••••••••••••••</code>
+    <button class="btn" type="button" data-reveal>Reveal</button>
+    <button class="btn" type="button" data-copy>Copy</button>
+  </div>
+  <p class="muted">To call this peer from an accepted client: <code class="mono">POST /peer/{{peer.name}}/</code> with your own caller token.</p>
 </section>
+{% endif %}
 
 <section class="card">
-  <h2>Agent card — skills</h2>
-  {% if skills == "null" %}
-  <p class="muted">Peer registered without a card (or without skills).</p>
+  <h2>Agent card</h2>
+  {% if card_name.is_empty() && skills.is_empty() %}
+  <p class="muted">Peer registered without an agent card.</p>
   {% else %}
-  <pre class="json">{{skills}}</pre>
+  <table class="kv">
+    {% if !card_name.is_empty() %}<tr><th>Name</th><td>{{card_name}}</td></tr>{% endif %}
+    {% if !card_version.is_empty() %}<tr><th>Version</th><td class="mono">{{card_version}}</td></tr>{% endif %}
+    {% if !card_provider.is_empty() %}<tr><th>Provider</th><td>{{card_provider}}</td></tr>{% endif %}
+    {% if !card_desc.is_empty() %}<tr><th>Description</th><td>{{card_desc}}</td></tr>{% endif %}
+  </table>
+  {% if cap_streaming == Some(true) || cap_push == Some(true) || cap_sth == Some(true) %}
+  <p class="caps">
+    {% if cap_streaming == Some(true) %}<span class="chip">streaming</span>{% endif %}
+    {% if cap_push == Some(true) %}<span class="chip">push notifications</span>{% endif %}
+    {% if cap_sth == Some(true) %}<span class="chip">state-transition history</span>{% endif %}
+  </p>
   {% endif %}
-</section>
-
-<section class="card">
-  <h2>Raw agent card</h2>
+  {% if !skills.is_empty() %}
+  <h3>Skills</h3>
+  <table class="kv">
+    {% for s in skills %}
+    <tr><th>{{s.name}}</th><td>{% if !s.id.is_empty() %}<code class="mono">{{s.id}}</code>{% if !s.description.is_empty() %} — {% endif %}{% endif %}{{s.description}}{% if !s.tags.is_empty() %}<br><span class="muted">{{s.tags}}</span>{% endif %}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% endif %}
   <details>
     <summary>toggle raw card JSON</summary>
     <pre class="json">{{card_pretty}}</pre>
@@ -62,15 +83,15 @@
     </p>
     <div class="tbl-wrap">
     <table class="tbl">
-    <thead><tr><th>Time</th><th>Src</th><th>Dst</th><th>Method</th><th class="num">Status</th><th class="num">Bytes</th><th class="num">Ms</th></tr></thead>
+    <thead><tr><th>Time</th><th>Src</th><th>Dst</th><th>Method</th><th>Task</th><th class="num">Status</th><th class="num">Size</th><th class="num">Took</th></tr></thead>
     <tbody>
     {% for e in traffic %}
     <tr class="log-row{% if e.status >= 400 %} log-row-err{% endif %}" tabindex="0" aria-expanded="false"{% if let Some(p) = e.preview %} data-preview="{{p}}"{% endif %}{% if let Some(p) = e.resp_preview %} data-resp-preview="{{p}}"{% endif %}{% if let Some(s) = e.task_state %} data-task-state="{{s}}"{% endif %} data-method="{{e.method_display()}}" data-http="{{e.method}}" data-rpc-id="{% if let Some(id) = e.rpc_id %}{{id}}{% endif %}">
-      <td class="nw mono">{{e.ts_dt()}}</td><td class="mono">{{e.src}}</td><td class="mono">{{e.dst}}</td><td class="mono" title="HTTP {{e.method}}">{{e.method_display()}}</td><td class="num">{% if e.status >= 400 %}<span class="bad">{{e.status}}</span>{% else %}{{e.status}}{% endif %}</td><td class="num">{{e.bytes}}</td><td class="num">{{e.latency_ms}}</td>
+      <td class="nw mono ts" data-ts="{{e.ts}}">{{e.ts_dt()}}</td><td class="mono">{{e.src}}</td><td class="mono">{{e.dst}}</td><td class="mono">{% if let Some(r) = e.rpc_method %}{{r}}{% else %}<span class="stat-dim" title="HTTP {{e.method}}">{{e.method}}</span>{% endif %}</td><td class="mono">{% if !e.task_state_display().is_empty() %}{% if e.task_state_class() == "bad" %}<span class="bad">{{e.task_state_display()}}</span>{% else if e.task_state_class() == "warn" %}<span class="t-warn">{{e.task_state_display()}}</span>{% else %}<span class="stat-dim">{{e.task_state_display()}}</span>{% endif %}{% else %}<span class="stat-dim">—</span>{% endif %}</td><td class="num">{% if e.status >= 400 %}<span class="bad">{{e.status}}</span>{% else %}{{e.status}}{% endif %}</td><td class="num">{{e.bytes_human()}}</td><td class="num">{{e.latency_human()}}</td>
     </tr>
-    <tr class="log-detail" hidden><td colspan="7"></td></tr>
+    <tr class="log-detail" hidden><td colspan="8"></td></tr>
     {% endfor %}
-    {% if traffic.is_empty() %}<tr><td colspan="7" class="empty">No routed traffic yet.</td></tr>{% endif %}
+    {% if traffic.is_empty() %}<tr><td colspan="8" class="empty">No routed traffic yet.</td></tr>{% endif %}
     </tbody>
   </table>
   </div>

@@ -66,6 +66,12 @@ pub struct Peer {
     pub last_error: Option<String>,
     #[serde(default)]
     pub auto_accepted: bool,
+    /// Last health-probe attempt (success or failure) — epoch seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_probe_ts: Option<i64>,
+    /// Last health probe that SUCCEEDED — "unreachable since" anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ok_ts: Option<i64>,
 }
 
 impl Peer {
@@ -108,6 +114,14 @@ impl Peer {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "no card".to_string())
     }
+    /// Askama-friendly last-ok probe time (placeholder when never probed).
+    pub fn last_ok_dt(&self) -> String {
+        self.last_ok_ts.map(fmt_dt).unwrap_or_else(|| "—".into())
+    }
+    /// Askama-friendly last probe time (placeholder when never probed).
+    pub fn last_probe_dt(&self) -> String {
+        self.last_probe_ts.map(fmt_dt).unwrap_or_else(|| "—".into())
+    }
 }
 
 /// Chat room: a named group of peers + humans. Created from the admin UI;
@@ -125,6 +139,46 @@ impl Room {
     pub fn created_at_dt(&self) -> String {
         fmt_dt(self.created_at)
     }
+}
+
+/// Human latency: `812 ms` · `5.4 s` · `38 s` · `3m 05s` · `1h 02m`.
+pub fn fmt_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms} ms")
+    } else if ms < 10_000 {
+        format!("{:.1} s", ms as f64 / 1_000.0)
+    } else if ms < 60_000 {
+        format!("{} s", ms / 1_000)
+    } else if ms < 3_600_000 {
+        format!("{}m {:02}s", ms / 60_000, (ms % 60_000) / 1_000)
+    } else {
+        format!("{}h {:02}m", ms / 3_600_000, (ms % 3_600_000) / 60_000)
+    }
+}
+
+/// Human bytes: `271 B` · `1.2 kB` · `3.4 MB` · `1.1 GB`.
+pub fn fmt_bytes(b: u64) -> String {
+    const K: u64 = 1024;
+    if b < K {
+        return format!("{b} B");
+    }
+    let (v, u) = if b < K * K {
+        (b as f64 / K as f64, "kB")
+    } else if b < K * K * K {
+        (b as f64 / (K * K) as f64, "MB")
+    } else {
+        (b as f64 / (K * K * K) as f64, "GB")
+    };
+    format!("{v:.1} {u}")
+}
+
+/// Nearest-rank percentile over a pre-sorted slice (0 for empty).
+pub fn percentile(sorted: &[u64], p: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = (sorted.len() * p / 100).min(sorted.len() - 1);
+    sorted[idx]
 }
 
 /// One messenger bubble. `conv` is "dm:<a>|<b>" (sorted name pair) or
@@ -211,6 +265,31 @@ impl RouteEntry {
     /// Method shown in the UI: JSON-RPC method when captured, else HTTP method.
     pub fn method_display(&self) -> &str {
         self.rpc_method.as_deref().unwrap_or(&self.method)
+    }
+    /// Human latency (`812 ms`, `5.4 s`, `3m 05s`).
+    pub fn latency_human(&self) -> String {
+        fmt_ms(self.latency_ms)
+    }
+    /// Human payload size (`271 B`, `1.2 kB`).
+    pub fn bytes_human(&self) -> String {
+        fmt_bytes(self.bytes)
+    }
+    /// A2A task state for display: `TASK_STATE_COMPLETED` → `completed`.
+    pub fn task_state_display(&self) -> String {
+        self.task_state
+            .as_deref()
+            .unwrap_or_default()
+            .trim_start_matches("TASK_STATE_")
+            .to_ascii_lowercase()
+    }
+    /// Color class for the task state: errors red, action-needed warn,
+    /// everything else quiet ("" = default muted rendering).
+    pub fn task_state_class(&self) -> &'static str {
+        match self.task_state.as_deref() {
+            Some("TASK_STATE_FAILED") | Some("TASK_STATE_REJECTED") => "bad",
+            Some("TASK_STATE_INPUT_REQUIRED") => "warn",
+            _ => "",
+        }
     }
 }
 
@@ -589,6 +668,13 @@ impl App {
             .into_iter()
             .rev()
             .collect();
+        // Seed the routing ring from the persisted log tail so dashboard
+        // KPIs, the flow log, and peer activity survive restarts (history
+        // lives in routing.jsonl; the ring is only the last RING_CAP).
+        let mut routes = crate::admin::read_routing_log(&data_dir);
+        let ring_seed: VecDeque<RouteEntry> = routes
+            .drain(routes.len().saturating_sub(RING_CAP)..)
+            .collect();
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             // Never follow redirects: keeps egress pinned to the registered URL (SSRF guard).
@@ -597,7 +683,7 @@ impl App {
         let app = Self {
             data_dir: data_dir.clone(),
             inner: RwLock::new(inner),
-            log_ring: RwLock::new(VecDeque::with_capacity(RING_CAP)),
+            log_ring: RwLock::new(ring_seed),
             log_tx,
             peers_tx,
             chat_ring: RwLock::new(chat_tail.into_iter().collect()),

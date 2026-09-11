@@ -7,7 +7,12 @@
   var log = document.getElementById('flowlog');
   if (!el) return;
   var NS = 'http://www.w3.org/2000/svg';
-  var NODE_W = 150, NODE_H = 34, GAP = 24, GATE_W = 130, GATE_H = 44;
+  var NODE_H = 34, GAP = 24, GATE_W = 130, GATE_H = 44;
+  // Node pill width sized to its label (dot + padding + ~7.6px/char at 13px).
+  function nodeW(name, channel) {
+    var chars = name.length + (channel ? 2 : 0); // ⛓ suffix space
+    return Math.max(110, Math.min(300, Math.ceil(chars * 7.6) + 32));
+  }
   var ACTIVE_DECAY_MS = 8000;
   var FLOW_STEP_MS = 450;       // per-hop packet duration
   var state = { peers: [], lastActive: {}, counts: {}, errs: {}, timer: null };
@@ -18,7 +23,9 @@
 
   function layout(peers) {
     var n = peers.length;
-    var minRx = ((NODE_W + GAP) * Math.max(n, 1)) / (2 * Math.PI);
+    var maxW = 0;
+    peers.forEach(function (p) { maxW = Math.max(maxW, nodeW(p.name, p.channel)); });
+    var minRx = ((maxW + GAP) * Math.max(n, 1)) / (2 * Math.PI);
     var rx = Math.max(280, minRx);
     // small peer counts: flat wide ellipse, half-step start angle so 2 peers
     // sit left/right of the gateway instead of stacking vertically
@@ -29,10 +36,10 @@
       var a = a0 + (2 * Math.PI * i) / n;
       nodes.push({
         id: peers[i].name, x: rx * Math.cos(a), y: ry * Math.sin(a),
-        w: NODE_W, h: NODE_H, peer: peers[i]
+        w: nodeW(peers[i].name, peers[i].channel), h: NODE_H, peer: peers[i]
       });
     }
-    return { nodes: nodes, w: rx * 2 + NODE_W + GATE_W, h: ry * 2 + NODE_H + GATE_H };
+    return { nodes: nodes, w: rx * 2 + maxW + GATE_W, h: ry * 2 + NODE_H + GATE_H };
   }
 
   function edgePath(gate, node) {
@@ -52,6 +59,7 @@
     if (p.state === 'pending') return 'dot-pending';
     if (p.state !== 'accepted') return 'dot-pending';
     if (p.healthy === false) return 'dot-bad';
+    if (p.healthy == null) return 'dot-unknown';
     return 'dot-ok';
   }
 
@@ -108,21 +116,22 @@
     // peer nodes
     state.peers.forEach(function (p) {
       var node = byId[p.name];
+      var w = node.w;
       var g = svgEl('g', { transform: 'translate(' + node.x + ',' + node.y + ')' });
       var box = svgEl('rect', {
-        x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 17,
+        x: -w / 2, y: -NODE_H / 2, width: w, height: NODE_H, rx: 17,
         class: 'topo-node' + (state.lastActive[p.name] && Date.now() - state.lastActive[p.name] < ACTIVE_DECAY_MS ? ' busy' : '')
       });
       g.appendChild(box);
-      g.appendChild(svgEl('circle', { cx: -NODE_W / 2 + 15, cy: 0, r: 4, class: 'dot ' + dotClass(p) }));
+      g.appendChild(svgEl('circle', { cx: -w / 2 + 15, cy: 0, r: 4, class: 'dot ' + dotClass(p) }));
       var t = svgEl('text', { x: 4, y: 4, class: 'topo-label' });
-      var max = p.channel ? 12 : 14;
+      var max = Math.floor((w - 32) / 7.6); // label budget inside the pill
       var label = p.name.length > max ? p.name.slice(0, max - 1) + '…' : p.name;
       t.textContent = label + (p.channel ? ' ⛓' : '');
       g.appendChild(t);
       var c = state.counts[p.name] || 0;
       if (c > 0) {
-        var ct = svgEl('text', { x: NODE_W / 2 - 12, y: 4, class: 'topo-count' });
+        var ct = svgEl('text', { x: w / 2 - 12, y: 4, class: 'topo-count' });
         ct.textContent = String(c);
         g.appendChild(ct);
       }
@@ -244,10 +253,10 @@
     var m = JSON.parse(e.data);
     if (!m || !m.dst) return;
     var ok = m.status < 400;
-    // live ring counter + error/latency stats (covers server render gap)
+    // live windowed counters (covers server render gap; a fresh event is
+    // always inside the server's 1h window)
     bumpRouted();
     if (ok) { /* errors unchanged */ } else bumpErrors();
-    updateAvg(m.latency_ms);
     // attribution: strip channel-/client- prefixes when they match a known peer
     var srcName = normalizeCaller(m.src);
     var knownSrc = state.peers.some(function (p) { return p.name === srcName; });
@@ -280,7 +289,9 @@
     return '';
   }
 
-  // --- live dashboard stats ---
+  // lazy live counters — windowed KPIs render server-side; SSE events only
+  // increment (never resync from /api/topology: its total_routes is the
+  // all-time ring length and would clobber the 1h window)
   function statNum(id) { return document.getElementById(id); }
   function bumpRouted() {
     var el = statNum('stat-routed');
@@ -292,25 +303,10 @@
     var card = el && el.closest('.stat');
     if (card && parseInt(el.textContent, 10) > 0) card.classList.add('stat-bad');
   }
-  // lazy incremental mean over the live session (ring average shown at load)
-  var liveN = 0, liveSum = 0;
-  function updateAvg(ms) {
-    liveN++; liveSum += ms;
-    var el = statNum('stat-avg-ms');
-    // ponytail: session-average blend; re-baseline from the ring on reload
-    if (el) el.firstChild.textContent = Math.round(liveSum / liveN);
-  }
-  function setRouted(n) {
-    var el = statNum('stat-routed');
-    if (el) el.textContent = String(n);
-  }
 
   function refreshPeers(cb) {
     fetch('/api/topology').then(function (r) { return r.json(); }).then(function (d) {
       var peers = d.peers || [];
-      // resync the ring counter from the server (covers the window between
-      // page load and the first SSE event, and ring truncation at 1000)
-      if (typeof d.total_routes === 'number') setRouted(d.total_routes);
       var key = peers.map(function (p) { return p.name + ':' + p.state + ':' + !!p.healthy; }).sort().join('|');
       var oldKey = state.peers.map(function (p) { return p.name + ':' + p.state + ':' + !!p.healthy; }).sort().join('|');
       state.peers = peers;

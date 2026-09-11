@@ -3766,3 +3766,237 @@ async fn chat_log_is_newline_delimited() {
         .unwrap();
     assert_eq!(app2.chat_seq.load(std::sync::atomic::Ordering::Relaxed), 4);
 }
+
+// ----- UI data-meaning improvements (0.7.2): formatting, seeding, states -----
+
+#[test]
+fn unit_formatting_helpers() {
+    use a2a_switchboard::state::{fmt_bytes, fmt_ms, percentile};
+    assert_eq!(fmt_ms(812), "812 ms");
+    assert_eq!(fmt_ms(5_400), "5.4 s");
+    assert_eq!(fmt_ms(38_000), "38 s");
+    assert_eq!(fmt_ms(185_000), "3m 05s");
+    assert_eq!(fmt_ms(3_720_000), "1h 02m");
+    assert_eq!(fmt_bytes(271), "271 B");
+    assert_eq!(fmt_bytes(1_200), "1.2 kB");
+    assert_eq!(fmt_bytes(3_400_000), "3.2 MB");
+    let sorted = vec![1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert_eq!(percentile(&sorted, 95), 10);
+    assert_eq!(percentile(&sorted, 50), 6); // upper median at even counts
+    assert_eq!(percentile(&[], 95), 0);
+}
+
+#[test]
+fn task_state_display_mapping() {
+    use a2a_switchboard::state::RouteEntry;
+    let e = |t: Option<&str>| RouteEntry {
+        ts: 0,
+        src: "a".into(),
+        dst: "b".into(),
+        method: "POST".into(),
+        status: 200,
+        bytes: 1,
+        latency_ms: 1,
+        rpc_method: None,
+        rpc_id: None,
+        preview: None,
+        resp_preview: None,
+        task_state: t.map(String::from),
+    };
+    assert_eq!(
+        e(Some("TASK_STATE_COMPLETED")).task_state_display(),
+        "completed"
+    );
+    assert_eq!(
+        e(Some("TASK_STATE_INPUT_REQUIRED")).task_state_class(),
+        "warn"
+    );
+    assert_eq!(e(Some("TASK_STATE_FAILED")).task_state_class(), "bad");
+    assert_eq!(e(Some("TASK_STATE_WORKING")).task_state_class(), "");
+    assert_eq!(e(None).task_state_display(), "");
+}
+
+#[tokio::test]
+async fn ring_seeds_from_routing_log_on_boot() {
+    // Pre-existing routing.jsonl history must populate the ring at boot so
+    // dashboard KPIs and the flow log survive restarts.
+    let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("agw-test-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = |ts: i64| {
+        format!(
+            r#"{{"ts":{ts},"src":"a","dst":"b","method":"POST","status":200,"bytes":10,"latency_ms":5}}"#
+        )
+    };
+    std::fs::write(
+        dir.join("routing.jsonl"),
+        format!("{}\n{}\n{}\n", entry(1), entry(2), entry(3)),
+    )
+    .unwrap();
+    let app = App::load(dir).await.unwrap();
+    let ring = app.log_ring.read().await;
+    assert_eq!(ring.len(), 3, "ring must be seeded from routing.jsonl tail");
+    assert_eq!(ring.back().unwrap().ts, 3, "newest entry last");
+}
+
+#[tokio::test]
+async fn peers_ui_three_state_health_and_activity() {
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"alpha","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    // healthy == None → "unknown", never a red "unreachable".
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peers?fragment=1", None, None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let b = String::from_utf8_lossy(&body);
+    assert!(b.contains(">unknown<"), "unknown health state: {b}");
+    assert!(
+        !b.contains("unreachable"),
+        "None must not render as unreachable"
+    );
+    assert!(b.contains("Admitted"), "source column renamed: {b}");
+    assert!(b.contains("Activity"), "activity column present: {b}");
+
+    // Ring traffic → activity count renders.
+    app.log_route(a2a_switchboard::state::RouteEntry {
+        ts: a2a_switchboard::state::now(),
+        src: "alpha".into(),
+        dst: "alpha".into(),
+        method: "POST".into(),
+        status: 200,
+        bytes: 10,
+        latency_ms: 5,
+        rpc_method: None,
+        rpc_id: None,
+        preview: None,
+        resp_preview: None,
+        task_state: None,
+    })
+    .await;
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peers?fragment=1", None, None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let b = String::from_utf8_lossy(&body);
+    assert!(b.contains("1/h"), "activity count: {b}");
+
+    // Peer detail: reverse channel "direct" (neutral), no red "no".
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/peers/alpha?fragment=1", None, None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let b = String::from_utf8_lossy(&body);
+    assert!(b.contains(">direct<"), "reverse channel neutral state: {b}");
+    assert!(b.contains("Gateway identity"), "caller token section: {b}");
+}
+
+#[tokio::test]
+async fn logs_table_renders_task_and_human_units() {
+    let (router, app, _gw, _boot) = test_app().await;
+    app.log_route(a2a_switchboard::state::RouteEntry {
+        ts: a2a_switchboard::state::now(),
+        src: "a".into(),
+        dst: "b".into(),
+        method: "POST".into(),
+        status: 200,
+        bytes: 271,
+        latency_ms: 5_400,
+        rpc_method: Some("message/send".into()),
+        rpc_id: None,
+        preview: None,
+        resp_preview: None,
+        task_state: Some("TASK_STATE_COMPLETED".into()),
+    })
+    .await;
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/logs/full?fragment=1", None, None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let b = String::from_utf8_lossy(&body);
+    assert!(b.contains("completed"), "task state column: {b}");
+    assert!(b.contains("5.4 s"), "human latency: {b}");
+    assert!(b.contains("271 B"), "human bytes: {b}");
+    assert!(
+        !b.contains("data/routing.jsonl"),
+        "caption must not leak server paths: {b}"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_red_kpis_render() {
+    let (router, _app, _gw, _boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/", None, None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let b = String::from_utf8_lossy(&body);
+    assert!(b.contains("routed · last hour"), "windowed KPI: {b}");
+    assert!(b.contains("p95 latency"), "p95 KPI: {b}");
+    assert!(b.contains("peers healthy"), "fleet KPI: {b}");
+}
+
+#[tokio::test]
+async fn fleet_kpi_excludes_revoked_peers() {
+    let (router, app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(r#"{"name":"alpha","url":"http://127.0.0.1:1/"}"#),
+        ))
+        .await
+        .unwrap();
+    // Healthy, then revoked: peers_up must not count it (set_state leaves
+    // healthy=Some(true) intact).
+    a2a_switchboard::health::apply_health(&app, "alpha", true, None).await;
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/peers/alpha/revoke", None, None))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/", None, None))
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let b = String::from_utf8_lossy(&body);
+    assert!(
+        b.contains(">0/0<"),
+        "revoked healthy peer must not count as up: {b}"
+    );
+}

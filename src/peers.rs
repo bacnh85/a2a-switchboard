@@ -156,6 +156,8 @@ pub async fn register(
         healthy: None,
         last_error: None,
         auto_accepted: kind == TokenKind::Bootstrap,
+        last_probe_ts: None,
+        last_ok_ts: None,
     });
     drop(inner);
     app.persist().await;

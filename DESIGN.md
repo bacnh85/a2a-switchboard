@@ -187,7 +187,9 @@ Topology node pills 17px half-height radius (SVG), gateway 10px rect.
   hover tile surface-muted; hairline rule above the row. Severity = the number
   itself tinted warning/danger (the label carries the meaning for a11y).
 - **status:** quiet by default — plain mono text for 2xx; `badge-bad` pill only
-  for ≥400, plus 3px danger left border on the error row.
+  for ≥400, plus 3px danger left border on the error row. A2A task states in
+  the log render lowercase and quiet (`completed` muted); failed/rejected get
+  the danger tint, input-required the warning tint.
 - **instrument-panel:** topology canvas = surface-muted tint, radius lg, no
   shadow (bg-shift separation); white node pills pop on it; wide flat ellipse
   layout with half-step start angle so small peer counts sit left/right of the
@@ -195,6 +197,10 @@ Topology node pills 17px half-height radius (SVG), gateway 10px rect.
   surface, radius lg, no shadow. Login = white + elev-2 (the one floating
   surface).
 - **token row:** masked-by-default mono token + Reveal + Copy controls.
+- **capability chips:** declared agent-card capabilities as quiet chips
+  (surface-2 bg, muted text, radius sm) — on-state only; unsupported
+  capabilities stay unlisted. Topology legend: 8px `lg-dot` swatches in the
+  health colors with a muted caption line under the canvas.
 - **chat (messenger):** two-pane grid (280px list | thread). Conversation
   items: 28px avatar circle (identity-<n> tint, dark initial), title,
   one-line muted preview, accent unread pill. Bubbles: max-width 78%,

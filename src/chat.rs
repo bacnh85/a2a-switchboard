@@ -409,6 +409,8 @@ pub async fn create_human(State(app): State<AppState>, Form(f): Form<HumanForm>)
             healthy: Some(true),
             last_error: None,
             auto_accepted: true,
+            last_probe_ts: None,
+            last_ok_ts: None,
         });
     }
     app.persist().await;

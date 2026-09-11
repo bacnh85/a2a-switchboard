@@ -22,12 +22,35 @@ pub struct DashboardTmpl {
     pub active_nav: &'static str,
     pub localhost: bool,
     pub authed: bool,
-    pub errors: u64,
-    pub avg_ms: u64,
+    /// routed requests in the last hour (from the ring)
+    pub routed_1h: u64,
+    /// requests per minute over the same window (rounded)
+    pub rate_per_min: u64,
+    pub errors_1h: u64,
+    /// error percentage over the window (0 when no traffic)
+    pub err_pct: u64,
+    /// p50/p95 latency, human-formatted ("" when no traffic)
+    pub p50: String,
+    pub p95: String,
     pub pending: u64,
-    pub total_routes: u64,
+    /// fleet health: healthy peers / total peers, active reverse channels
+    pub peers_up: usize,
+    pub peers_total: usize,
+    pub channels: usize,
+    /// entries in the routing ring (all-time tail, for the quiet fallback)
+    pub ring_total: u64,
     pub recent: Vec<RouteEntry>,
     pub peers_json: String,
+}
+
+/// Peer row for the registry table: the peer plus ring-derived activity.
+#[derive(Clone, serde::Serialize)]
+pub struct PeerRow {
+    pub p: Peer,
+    /// routed requests involving this peer in the last hour
+    pub reqs_1h: u64,
+    /// ts of the most recent routed request involving this peer (ring window)
+    pub last_ts: Option<i64>,
 }
 
 #[derive(Template)]
@@ -38,7 +61,7 @@ pub struct PeersTmpl {
     pub localhost: bool,
     pub authed: bool,
     pub pending: Vec<Peer>,
-    pub accepted: Vec<Peer>,
+    pub accepted: Vec<PeerRow>,
     pub revoked: Vec<Peer>,
 }
 
@@ -49,8 +72,17 @@ pub struct PeersTmpl {
 #[template(path = "_peers_body.html")]
 pub struct PeersBodyTmpl {
     pub pending: Vec<Peer>,
-    pub accepted: Vec<Peer>,
+    pub accepted: Vec<PeerRow>,
     pub revoked: Vec<Peer>,
+}
+
+/// One skill from the peer's agent card, structured for display.
+#[derive(Clone, serde::Serialize)]
+pub struct CardSkill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub tags: String,
 }
 
 #[derive(Template)]
@@ -65,10 +97,15 @@ pub struct PeerDetailTmpl {
     pub channel: bool,
     pub registered_at: String,
     pub last_seen: String,
-    /// capabilities array from the card (JSON stringified for display)
-    pub capabilities: String,
-    /// skills array from the card (JSON stringified for display)
-    pub skills: String,
+    /// structured card fields (empty when the peer registered cardless)
+    pub card_name: String,
+    pub card_desc: String,
+    pub card_version: String,
+    pub card_provider: String,
+    pub cap_streaming: Option<bool>,
+    pub cap_push: Option<bool>,
+    pub cap_sth: Option<bool>,
+    pub skills: Vec<CardSkill>,
     pub card_pretty: String,
     pub traffic: Vec<RouteEntry>,
     pub traffic_total: u64,
@@ -88,8 +125,14 @@ pub struct PeerBodyTmpl {
     pub channel: bool,
     pub registered_at: String,
     pub last_seen: String,
-    pub capabilities: String,
-    pub skills: String,
+    pub card_name: String,
+    pub card_desc: String,
+    pub card_version: String,
+    pub card_provider: String,
+    pub cap_streaming: Option<bool>,
+    pub cap_push: Option<bool>,
+    pub cap_sth: Option<bool>,
+    pub skills: Vec<CardSkill>,
     pub card_pretty: String,
     pub traffic: Vec<RouteEntry>,
     pub traffic_total: u64,
@@ -156,24 +199,66 @@ pub async fn dashboard(State(app): State<AppState>) -> Response {
         .iter()
         .filter(|p| p.state == PeerState::Pending)
         .count() as u64;
+    let peers_total = inner
+        .peers
+        .iter()
+        .filter(|p| p.state != PeerState::Revoked)
+        .count();
+    // peers_up must share peers_total's denominator: revoked peers keep
+    // healthy=Some(true) after revocation (set_state never clears it).
+    let peers_up = inner
+        .peers
+        .iter()
+        .filter(|p| p.state != PeerState::Revoked && p.healthy == Some(true))
+        .count();
     drop(inner);
-    // RED-style stats straight from the routing ring (last 1000 requests).
-    let (total_routes, errors, latency_sum) = {
+    let channels = app.channels.len();
+    // Windowed RED stats from the ring (seeded from routing.jsonl at boot,
+    // so they survive restarts). 60-minute window.
+    let cutoff = crate::state::now() - 3600;
+    let (routed_1h, errors_1h, mut latencies) = {
         let ring = app.log_ring.read().await;
-        ring.iter().fold((0u64, 0u64, 0u64), |(t, e, l), x| {
-            (t + 1, e + (x.status >= 400) as u64, l + x.latency_ms)
-        })
+        ring.iter()
+            .fold((0u64, 0u64, Vec::new()), |(t, e, mut l), x| {
+                if x.ts >= cutoff {
+                    l.push(x.latency_ms);
+                    (t + 1, e + (x.status >= 400) as u64, l)
+                } else {
+                    (t, e, l)
+                }
+            })
     };
-    let avg_ms = latency_sum.checked_div(total_routes).unwrap_or(0);
+    latencies.sort_unstable();
+    let human_pct = |p: usize| {
+        let v = crate::state::percentile(&latencies, p);
+        if latencies.is_empty() {
+            String::new()
+        } else {
+            crate::state::fmt_ms(v)
+        }
+    };
+    let (p50, p95) = (human_pct(50), human_pct(95));
+    let err_pct = errors_1h
+        .checked_mul(100)
+        .map_or(0, |n| n / routed_1h.max(1));
+    let rate_per_min = (routed_1h + 30) / 60;
+    let ring_total = app.log_ring.read().await.len() as u64;
     let t = DashboardTmpl {
         title: "Dashboard",
         active_nav: "dashboard",
         localhost: is_localhost(),
         authed: app.admin_set().await,
-        errors,
-        avg_ms,
+        routed_1h,
+        rate_per_min,
+        errors_1h,
+        err_pct,
+        p50,
+        p95,
         pending,
-        total_routes,
+        peers_up,
+        peers_total,
+        channels,
+        ring_total,
         recent: app.recent_log(8).await,
         peers_json,
     };
@@ -183,6 +268,21 @@ pub async fn dashboard(State(app): State<AppState>) -> Response {
 pub async fn peers_page(State(app): State<AppState>, Query(frag): Query<FragQuery>) -> Response {
     let (pending, accepted, revoked) = {
         let inner = app.inner.read().await;
+        let now = crate::state::now();
+        let ring = app.log_ring.read().await;
+        let rows = |peers: Vec<Peer>| {
+            peers
+                .into_iter()
+                .map(|p| {
+                    let (reqs_1h, last_ts) = peer_activity(&ring, &p.name, now);
+                    PeerRow {
+                        p,
+                        reqs_1h,
+                        last_ts,
+                    }
+                })
+                .collect::<Vec<PeerRow>>()
+        };
         (
             inner
                 .peers
@@ -190,12 +290,14 @@ pub async fn peers_page(State(app): State<AppState>, Query(frag): Query<FragQuer
                 .filter(|p| p.state == PeerState::Pending)
                 .cloned()
                 .collect(),
-            inner
-                .peers
-                .iter()
-                .filter(|p| p.state == PeerState::Accepted)
-                .cloned()
-                .collect(),
+            rows(
+                inner
+                    .peers
+                    .iter()
+                    .filter(|p| p.state == PeerState::Accepted)
+                    .cloned()
+                    .collect(),
+            ),
             inner
                 .peers
                 .iter()
@@ -440,6 +542,25 @@ fn filter_routing_log(data_dir: &std::path::Path, f: &LogFilters) -> Vec<RouteEn
     out
 }
 
+/// Ring-derived per-peer activity: requests in the last hour + most recent ts.
+fn peer_activity(
+    ring: &std::collections::VecDeque<RouteEntry>,
+    name: &str,
+    now: i64,
+) -> (u64, Option<i64>) {
+    let mut reqs = 0u64;
+    let mut last = None;
+    for e in ring {
+        if e.src == name || e.dst == name {
+            if e.ts >= now - 3600 {
+                reqs += 1;
+            }
+            last = Some(e.ts);
+        }
+    }
+    (reqs, last)
+}
+
 /// GET /peers/{name} — detail page: agent card (capabilities/skills),
 /// registration/liveness metadata, and per-peer traffic history.
 /// `?dir=in` shows only calls TO the peer, `?dir=out` only calls BY it.
@@ -464,13 +585,88 @@ pub async fn peer_detail(
     let registered_at = crate::state::fmt_dt(peer.registered_at);
     let last_seen = peer.last_seen.map(crate::state::fmt_dt).unwrap_or_default();
 
-    let (capabilities, skills) = match &peer.card {
-        serde_json::Value::Object(m) => (
-            serde_json::to_string_pretty(&m.get("capabilities")).unwrap_or_else(|_| "null".into()),
-            serde_json::to_string_pretty(&m.get("skills")).unwrap_or_else(|_| "null".into()),
-        ),
-        _ => ("null".into(), "null".into()),
+    // Structured agent-card fields for display (empty/None when cardless).
+    let card_obj = peer.card.as_object();
+    let gstr = |k: &str| {
+        card_obj
+            .and_then(|m| m.get(k))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
     };
+    let card_name = gstr("name");
+    let card_desc = gstr("description");
+    let card_version = gstr("version");
+    let card_provider = card_obj
+        .and_then(|m| m.get("provider"))
+        .and_then(|v| v.as_object())
+        .map(|p| {
+            let org = p
+                .get("organization")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let url = p.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+            match (org.is_empty(), url.is_empty()) {
+                (true, true) => String::new(),
+                (false, true) => org.to_string(),
+                (true, false) => url.to_string(),
+                (false, false) => format!("{org} · {url}"),
+            }
+        })
+        .unwrap_or_default();
+    let cap = |k: &str| {
+        card_obj
+            .and_then(|m| m.get("capabilities"))
+            .and_then(|c| c.get(k))
+            .and_then(|v| v.as_bool())
+    };
+    let (cap_streaming, cap_push, cap_sth) = (
+        cap("streaming"),
+        cap("pushNotifications"),
+        cap("stateTransitionHistory"),
+    );
+    let skills: Vec<CardSkill> = card_obj
+        .and_then(|m| m.get("skills"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| {
+                    // A2A skills are objects {id,name,description,tags}; some
+                    // agents post plain strings — accept both.
+                    if let Some(txt) = s.as_str() {
+                        return Some(CardSkill {
+                            id: String::new(),
+                            name: txt.to_string(),
+                            description: String::new(),
+                            tags: String::new(),
+                        });
+                    }
+                    let o = s.as_object()?;
+                    let gs = |k: &str| {
+                        o.get(k)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    Some(CardSkill {
+                        id: gs("id"),
+                        name: gs("name"),
+                        description: gs("description"),
+                        tags: o
+                            .get("tags")
+                            .and_then(|v| v.as_array())
+                            .map(|t| {
+                                t.iter()
+                                    .filter_map(|x| x.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let card_pretty = serde_json::to_string_pretty(&peer.card).unwrap_or_else(|_| "{}".into());
 
     // per-peer traffic from routing.jsonl (peer appears as src or dst) —
@@ -510,7 +706,13 @@ pub async fn peer_detail(
             channel: app.channels.has(&name),
             registered_at,
             last_seen,
-            capabilities,
+            card_name,
+            card_desc,
+            card_version,
+            card_provider,
+            cap_streaming,
+            cap_push,
+            cap_sth,
             skills,
             card_pretty,
             traffic,
@@ -532,7 +734,13 @@ pub async fn peer_detail(
         channel: app.channels.has(&name),
         registered_at,
         last_seen,
-        capabilities,
+        card_name,
+        card_desc,
+        card_version,
+        card_provider,
+        cap_streaming,
+        cap_push,
+        cap_sth,
         skills,
         card_pretty,
         traffic,

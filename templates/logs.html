@@ -3,10 +3,10 @@
 <h1>Communication log</h1>
 
 <form method="get" action="/logs/full" class="filter-bar">
-  <input type="text" name="src" placeholder="caller contains…" value="{{q_src}}" aria-label="filter by source">
-  <input type="text" name="dst" placeholder="destination contains…" value="{{q_dst}}" aria-label="filter by destination">
-  <input type="text" name="method" placeholder="method (e.g. message/send)" value="{{q_method}}" aria-label="filter by rpc or http method">
-  <input type="text" name="status" placeholder="status (e.g. 200)" value="{{q_status}}" aria-label="filter by status">
+  <input type="text" name="src" placeholder="caller…" value="{{q_src}}" aria-label="filter by source">
+  <input type="text" name="dst" placeholder="destination…" value="{{q_dst}}" aria-label="filter by destination">
+  <input type="text" name="method" placeholder="method…" value="{{q_method}}" aria-label="filter by rpc or http method">
+  <input type="text" name="status" placeholder="status…" value="{{q_status}}" aria-label="filter by status">
   <label class="chk"><input type="checkbox" name="errors" value="1" {% if errors_only %}checked{% endif %}> errors only</label>
   <button class="btn btn-primary" type="submit">Filter</button>
   <a class="btn" href="/logs/full">Clear</a>

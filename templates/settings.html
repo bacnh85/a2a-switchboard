@@ -26,9 +26,9 @@
   {% if human == "name" %}<div class="banner banner-warn" role="alert">Name must be 1-64 chars of [a-zA-Z0-9._-].</div>{% endif %}
   {% if human == "duplicate" %}<div class="banner banner-warn" role="alert">That name is already registered.</div>{% endif %}
   <form method="post" action="/settings/humans" class="human-form">
-    <label for="human-name">Name</label>
+    <label for="human-name">Operator name</label>
     <input id="human-name" name="name" required maxlength="64" pattern="[a-zA-Z0-9._-]{1,64}" autocomplete="off">
-    <button class="btn btn-primary" type="submit">Create human peer</button>
+    <button class="btn btn-primary" type="submit">Create operator</button>
   </form>
   {% if !humans.is_empty() %}
   <div class="tbl-wrap">
@@ -45,7 +45,7 @@
           <button class="btn" type="button" data-copy>Copy</button>
         </div>
       {% else %}<span class="muted">—</span>{% endif %}</td>
-      <td class="nw">{{h.registered_at_dt()}}</td>
+      <td class="nw ts-rel" data-ts="{{h.registered_at}}">{{h.registered_at_dt()}}</td>
       <td class="actions">
         <details class="confirm">
           <summary class="btn btn-danger">Delete</summary>
@@ -83,34 +83,6 @@
     <form method="post" action="/settings/bootstrap/regenerate"><button class="btn btn-danger">Confirm regenerate</button></form></div>
   </details>
 </section>
-<script>
-(function () {
-  function copyText(t, ok, fail) {
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(t).then(ok, fail);
-    } else {
-      var ta = document.createElement('textarea');
-      ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); ok(); } catch (e) { fail(); }
-      ta.remove();
-    }
-  }
-  document.querySelectorAll('.token-row').forEach(function (row) {
-    var code = row.querySelector('.token'), tok = code.dataset.token, shown = false;
-    var reveal = row.querySelector('[data-reveal]'), cp = row.querySelector('[data-copy]');
-    if (reveal) reveal.addEventListener('click', function () {
-      shown = !shown;
-      code.textContent = shown ? tok : '••••••••••••••••';
-      reveal.textContent = shown ? 'Hide' : 'Reveal';
-    });
-    if (cp) cp.addEventListener('click', function () {
-      copyText(tok, function () {
-        cp.textContent = 'Copied';
-        setTimeout(function () { cp.textContent = 'Copy'; }, 1500);
-      }, function () { cp.textContent = 'Select & copy manually'; });
-    });
-  });
-})();
-</script>
+<script src="/assets/token.js" defer></script>
+<script src="/assets/live.js" defer></script>
 {% endblock %}

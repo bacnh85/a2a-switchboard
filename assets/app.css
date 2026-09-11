@@ -185,6 +185,7 @@ label { font-size: var(--fs-sm); font-weight: 500; color: var(--text-2); }
 .stat-num { font-family: var(--mono); font-size: var(--fs-2xl); font-weight: 700; }
 .stat-num .stat-unit { font-size: var(--fs-base); font-weight: 500; color: var(--text-2); margin-left: 2px; }
 .stat-key { font-family: var(--mono); font-size: var(--fs-lg); font-weight: 600; }
+.stat-dim { color: var(--text-2); }
 .stat-label { color: var(--text-2); font-size: var(--fs-sm); }
 .stat-sub { color: var(--text-2); font-size: var(--fs-xs); }
 .stat-warn .stat-num, .stat-warn .stat-key { color: var(--warn); }
@@ -206,9 +207,29 @@ a.stat:hover { background: var(--surface-2); color: var(--text); }
   background: var(--surface-2);
   border-radius: var(--r-lg);
   padding: var(--s-2);
-  min-height: 320px;
+  overflow-x: auto;
 }
-.topo-svg { width: 100%; height: 400px; display: block; }
+.topo-svg { width: 100%; height: auto; min-width: 560px; display: block; }
+.topo-legend { margin: var(--s-1) 2px 0; font-size: var(--fs-sm); }
+.lg-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 4px 0 12px; }
+.topo-legend .lg-dot:first-child { margin-left: 0; }
+/* agent-card capability chips (on-state only; off-states listed in text) */
+.caps { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.chip {
+  background: var(--surface-2);
+  color: var(--text-2);
+  border-radius: var(--r-sm);
+  padding: 2px var(--s-2);
+  font-size: var(--fs-sm);
+}
+.t-warn { color: var(--warn); }
+.chat-live {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ok);
+}
+.chat-live.off { color: var(--text-2); }
 
 /* topology svg */
 .edge path { fill: none; }
@@ -232,9 +253,18 @@ a.stat:hover { background: var(--surface-2); color: var(--text); }
 .dot-ok { fill: var(--ok); }
 .dot-bad { fill: var(--bad); }
 .dot-pending { fill: var(--warn); }
+.dot-unknown { fill: var(--border); }
+.lg-dot.dot-ok { background: var(--ok); }
+.lg-dot.dot-bad { background: var(--bad); }
+.lg-dot.dot-pending { background: var(--warn); }
+.lg-dot.dot-unknown { background: var(--border); }
 
 /* live communication log — data is mono, ok is quiet, errors are loud */
 .dash-grid { display: grid; grid-template-columns: 1fr; gap: var(--s-2); align-items: start; }
+@media (min-width: 1200px) {
+  .dash-grid { grid-template-columns: 5fr 6fr; }
+  .dash-grid .flowlog { max-height: 420px; }
+}
 .dash-grid > * { min-width: 0; } /* svg intrinsic width must not blow out the track */
 .dash-grid .card { margin-bottom: 0; }
 .flowlog {
@@ -264,7 +294,7 @@ a.stat:hover { background: var(--surface-2); color: var(--text); }
 .flow-line:hover { background: var(--surface-2); }
 .flow-line:focus-visible { outline-offset: -2px; }
 .flow-time { color: var(--text-2); flex-shrink: 0; }
-.flow-src, .flow-dst { font-weight: 600; }
+.flow-src, .flow-dst { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .flow-arrow { color: var(--text-2); }
 .flow-method { color: var(--text-2); }
 .flow-status { flex-shrink: 0; margin-left: auto; font-weight: 600; }
@@ -310,8 +340,11 @@ a.stat:hover { background: var(--surface-2); color: var(--text); }
 .tbl td.num, .tbl th.num { text-align: right; }
 .tbl td.num { font-family: var(--mono); }
 .tbl .nw { white-space: nowrap; }
-.tbl td.url { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tbl td.name { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbl td.url { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbl td.name { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* keep row actions reachable when the table scrolls horizontally */
+.tbl td.actions { position: sticky; right: 0; background: var(--bg); box-shadow: -8px 0 8px -8px var(--border); }
+.tbl tbody tr:hover td.actions { background: var(--surface-2); }
 .tbl td a { color: var(--accent); }
 .tbl td.mono, .kv td.mono { font-family: var(--mono); }
 .log-row { cursor: pointer; }
@@ -331,7 +364,7 @@ a.stat:hover { background: var(--surface-2); color: var(--text); }
 .log-detail[hidden] { display: none; }
 
 /* buttons — flat, all states */
-.actions { display: flex; gap: var(--s-1); justify-content: flex-end; flex-wrap: wrap; }
+.actions { display: flex; gap: var(--s-1); justify-content: flex-end; flex-wrap: nowrap; white-space: nowrap; }
 .btn {
   font: inherit;
   font-weight: 500;
@@ -574,7 +607,7 @@ h2 { font-size: var(--fs-xl); margin: var(--s-4) 0 var(--s-2); }
   .shell { flex-direction: column; }
   .sidebar { width: 100%; height: auto; position: static; flex-direction: row; align-items: center; gap: var(--s-2); flex-wrap: wrap; min-width: 0; }
   .brand { padding: 0; }
-  .sidenav { flex-direction: row; flex-wrap: wrap; }
+  .sidenav { flex-direction: row; flex-wrap: nowrap; overflow-x: auto; }
   .sidebar-foot { margin: 0 0 0 auto; border: none; padding: 0; }
   .chat { grid-template-columns: 1fr; height: calc(100vh - 190px); }
   .chat.thread-open .chat-list { display: none; }

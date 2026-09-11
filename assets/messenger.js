@@ -721,13 +721,22 @@
         var es = new EventSource('/api/events');
         es.addEventListener('chat', onChatEvent);
         es.addEventListener('open', backfill);
+        // tiny live indicator in the thread header
+        var live = document.createElement('span');
+        live.className = 'chat-live';
+        live.textContent = 'live';
+        live.hidden = true;
+        headEl.appendChild(live);
+        es.addEventListener('open', function () { live.hidden = false; live.classList.remove('off'); live.textContent = 'live'; });
+        es.addEventListener('error', function () { live.hidden = false; live.classList.add('off'); live.textContent = 'reconnecting…'; });
       }
     })
     .catch(function () {
       headEl.textContent = '';
       var s = document.createElement('span');
-      s.className = 'muted';
-      s.textContent = 'Could not load chat state.';
+      s.className = 'banner banner-warn';
+      s.setAttribute('role', 'alert');
+      s.textContent = 'Could not load chat state — is the gateway still up? Reopen this page to retry.';
       headEl.appendChild(s);
     });
 })();

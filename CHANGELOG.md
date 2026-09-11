@@ -2,6 +2,52 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Dashboard KPIs survive restarts**: the routing ring is now seeded from
+  the `routing.jsonl` tail at boot — routed/errors/latency and the flow log
+  no longer reset to zero on every restart.
+- **Peer detail "Last seen"** no longer renders the timestamp twice.
+- **Health states are three-state**: an unprobed peer renders as muted
+  "unknown" instead of a red "unreachable"; peers/table tooltips carry the
+  last probe error and last-ok time (new `last_probe_ts`/`last_ok_ts` peer
+  fields, serde-defaulted).
+- **Reverse channel "no"** is now neutral muted "direct" instead of an error
+  badge (absence of a channel is normal for directly-reachable peers).
+- **Timestamps localize in the browser**: server-rendered UTC stays as the
+  no-JS fallback; JS rewrites log times to local time-of-day and last-
+  seen/registered stamps to relative ("2m ago"), full date in the tooltip.
+
+### Changed
+
+- **Dashboard KPIs are windowed RED**: routed (last hour, with req/min),
+  errors with error-rate %, p95 latency (with p50), pending, and a fleet
+  row (peers healthy x/y · reverse channels); a quiet hour falls back to
+  "N in history". Topology and the communication log sit side-by-side at
+  ≥1200px; a legend explains the health dots.
+- **Human-readable units** in all audit tables and KPIs: `5.4 s` / `3m 05s`
+  latencies, `1.2 kB` sizes; new **Task** column shows the A2A task state
+  (quiet by default, danger on failed/rejected, warning on input-required);
+  HTTP-only rows render muted `POST` next to RPC methods; log times show
+  time-of-day with the full date in the tooltip.
+- **Peers table**: new **Activity** column (requests/hour from the ring),
+  **Admitted** column (bootstrap token / manual), wider URL column, and a
+  sticky action column so Accept/Revoke stay reachable while the table
+  scrolls horizontally.
+- **Peer detail**: structured **Agent card** section (name, version,
+  provider, description, capability chips, skills list — string or object
+  skill arrays both render) replaces the raw JSON dumps (raw JSON stays
+  under a disclosure); new **Gateway identity** section shows the peer's
+  masked caller token with Reveal/Copy and the `POST /peer/<name>/` path.
+- **Topology** node pills size to their labels (no mid-name ellipsis on
+  moderately long names) and the canvas scales/scrolls instead of clipping.
+- **Chat**: load failures render as a warning banner with guidance plus a
+  live/reconnecting indicator in the thread header.
+- **Copy**: single term "human operator" (pill "operator", settings button
+  "Create operator"); log captions no longer expose server file paths.
+
 ## [0.7.1] - 2026-09-08
 
 ### Changed
