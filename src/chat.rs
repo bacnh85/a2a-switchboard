@@ -460,6 +460,9 @@ fn err_json(status: StatusCode, msg: &str) -> Response {
 
 /// Identity of the sender for internal sends: the chosen human's caller
 /// token (exact attribution) — or the human's name only.
+// clippy 1.98+ flags the large axum Response Err; callers pass it straight
+// up as their own Response, so boxing would churn every call site.
+#[allow(clippy::result_large_err)]
 async fn resolve_human(
     app: &AppState,
     name: Option<&str>,
@@ -879,6 +882,7 @@ async fn target_is_human(app: &AppState, name: &str) -> bool {
 }
 
 /// Validate room member names against the accepted registry; dedup, cap.
+#[allow(clippy::result_large_err)] // see resolve_human
 async fn validated_members(app: &AppState, members: &[String]) -> Result<Vec<String>, Response> {
     let inner = app.inner.read().await;
     let mut out: Vec<String> = Vec::new();
