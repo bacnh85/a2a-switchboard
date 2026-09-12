@@ -59,6 +59,19 @@ All notable changes to this project are documented in this file.
 
 ## [0.7.1] - 2026-09-08
 
+### Added
+
+- **Live admin UI for /peers, /logs/full, and peer detail**: registry changes
+  (register/accept/reject/revoke/delete) and health flips are broadcast on
+  the existing SSE stream as a new `peers` event (separate channel from
+  route events; flips only — a stable fleet emits nothing per heartbeat).
+  Pages ship server-rendered fragments (`?fragment=1`, same admin gate) that
+  a small vanilla client (`assets/live.js`) swaps in on SSE events plus a
+  30s drift poll — debounced, diff-checked (no-op when unchanged), and
+  skipped while the region holds focus or user-opened state (open
+  `<details>`, expanded rows). The filter form never swaps, so in-progress
+  inputs are never yanked. Dashboard live behavior is unchanged.
+
 ### Changed
 
 - **Chat**: messenger-style typing indicator — a lone three-dot bubble
@@ -123,21 +136,6 @@ All notable changes to this project are documented in this file.
 - Channel-delivered calls keep the `channel-` attribution marker only for
   unattributed callers (same behavior as 0.6.x); attributed callers now
   show their name on the channel path too.
-
-## [Unreleased]
-
-### Added
-
-- **Live admin UI for /peers, /logs/full, and peer detail**: registry changes
-  (register/accept/reject/revoke/delete) and health flips are broadcast on
-  the existing SSE stream as a new `peers` event (separate channel from
-  route events; flips only — a stable fleet emits nothing per heartbeat).
-  Pages ship server-rendered fragments (`?fragment=1`, same admin gate) that
-  a small vanilla client (`assets/live.js`) swaps in on SSE events plus a
-  30s drift poll — debounced, diff-checked (no-op when unchanged), and
-  skipped while the region holds focus or user-opened state (open
-  `<details>`, expanded rows). The filter form never swaps, so in-progress
-  inputs are never yanked. Dashboard live behavior is unchanged.
 
 ## [0.6.2] - 2026-09-02
 
