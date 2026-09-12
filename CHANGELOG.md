@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Dashboard**: the routing topology gets its own full-width row again — the
+  side-by-side split left the canvas too small once the fleet grows past a
+  handful of peers (a 12-peer fleet rendered unreadably small); the
+  communication log follows as a separate full-width section below.
+
 ## [0.7.2] - 2026-09-11
 
 ### Fixed

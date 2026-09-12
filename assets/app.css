@@ -260,11 +260,9 @@ a.stat:hover { background: var(--surface-2); color: var(--text); }
 .lg-dot.dot-unknown { background: var(--border); }
 
 /* live communication log — data is mono, ok is quiet, errors are loud */
+/* topology and log each get their own full-width row: a half-width canvas
+   is too small once the fleet grows past a handful of peers */
 .dash-grid { display: grid; grid-template-columns: 1fr; gap: var(--s-2); align-items: start; }
-@media (min-width: 1200px) {
-  .dash-grid { grid-template-columns: 5fr 6fr; }
-  .dash-grid .flowlog { max-height: 420px; }
-}
 .dash-grid > * { min-width: 0; } /* svg intrinsic width must not blow out the track */
 .dash-grid .card { margin-bottom: 0; }
 .flowlog {
