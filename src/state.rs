@@ -230,6 +230,14 @@ pub struct PeerEvent {
     pub name: String,
 }
 
+/// Chat control-plane event for the admin UI (SSE `chat_typing`): a human
+/// is typing in `conv`.
+#[derive(Clone, serde::Serialize)]
+pub struct TypingEvent {
+    pub conv: String,
+    pub src: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
     pub ts: i64,
@@ -255,6 +263,13 @@ pub struct RouteEntry {
     /// or "error" on a JSON-RPC error response (audit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_state: Option<String>,
+    /// A2A task id from the response (`result.id` when the result is a task),
+    /// tying routed exchanges to the task inbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// A2A context id from the request (`params.message.contextId`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
 }
 
 impl RouteEntry {
@@ -299,6 +314,7 @@ pub struct AuditInfo {
     pub rpc_method: Option<String>,
     pub rpc_id: Option<String>,
     pub preview: Option<String>,
+    pub context_id: Option<String>,
 }
 
 const PREVIEW_MAX: usize = 2048;
@@ -385,6 +401,12 @@ pub fn audit_extract(body: &[u8]) -> AuditInfo {
         preview.truncate(end);
         preview.push('…');
     }
+    // A2A context: params.message.contextId (v1.0) or params.contextId.
+    let context_id = v
+        .pointer("/params/message/contextId")
+        .or_else(|| v.pointer("/params/contextId"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.chars().take(128).collect());
     AuditInfo {
         rpc_method: v
             .get("method")
@@ -392,27 +414,53 @@ pub fn audit_extract(body: &[u8]) -> AuditInfo {
             .map(|s| s.chars().take(64).collect()),
         rpc_id,
         preview: Some(preview),
+        context_id,
     }
 }
 
 /// Extract audit info from a response body: the A2A task lifecycle state
-/// (`result.status.state`) or "error" on a JSON-RPC error, plus a redacted,
-/// size-capped preview of the result. Returns `(task_state, resp_preview)`.
+/// (`result.status.state`), the A2A task id (`result.id` when the result is
+/// a task — including the v1.0 `{"task": …}` wrapper), or "error" on a
+/// JSON-RPC error, plus a redacted, size-capped preview of the result.
 /// Guard extraction to JSON only at the call site (see peers.rs) — if SSE
 /// passthrough ever lands there, non-JSON bodies must not be buffered.
-pub fn audit_extract_response(body: &[u8]) -> (Option<String>, Option<String>) {
+pub fn audit_extract_response(body: &[u8]) -> (Option<String>, Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return (None, None);
+        return (None, None, None);
     };
-    // A2A Task objects carry lifecycle in result.status.state.
-    let task_state = if v.get("error").is_some() {
-        Some("error".to_string())
+    let cap64 = |s: &str| s.chars().take(64).collect::<String>();
+    let (task_state, task_id) = if v.get("error").is_some() {
+        (Some("error".to_string()), None)
     } else {
-        v.get("result")
+        let result = v.get("result");
+        let task_state = result
             .and_then(|r| r.get("status"))
             .and_then(|s| s.get("state"))
             .and_then(|s| s.as_str())
-            .map(|s| s.chars().take(64).collect())
+            .map(cap64);
+        // The id only counts as a task id when the result carries task
+        // structure (a lifecycle state, or kind: "task" — flat or wrapped).
+        let taskish = v
+            .pointer("/result/kind")
+            .and_then(|k| k.as_str())
+            .is_some_and(|k| k == "task")
+            || v.pointer("/result/task/kind")
+                .and_then(|k| k.as_str())
+                .is_some_and(|k| k == "task");
+        let task_id = if task_state.is_some() || taskish {
+            result
+                .and_then(|r| r.get("id"))
+                .and_then(|i| i.as_str())
+                .map(cap64)
+                .or_else(|| {
+                    v.pointer("/result/task/id")
+                        .and_then(|i| i.as_str())
+                        .map(cap64)
+                })
+        } else {
+            None
+        };
+        (task_state, task_id)
     };
     let mut preview = redact_json(v.get("result").unwrap_or(&v), PREVIEW_DEPTH).to_string();
     if preview.len() > PREVIEW_MAX {
@@ -423,7 +471,7 @@ pub fn audit_extract_response(body: &[u8]) -> (Option<String>, Option<String>) {
         preview.truncate(end);
         preview.push('…');
     }
-    (task_state, Some(preview))
+    (task_state, task_id, Some(preview))
 }
 
 #[derive(Default)]
@@ -525,6 +573,10 @@ pub struct App {
     /// Messenger history: ring for the UI, chat.jsonl on disk, SSE `chat`.
     pub chat_ring: RwLock<VecDeque<ChatMessage>>,
     pub chat_tx: broadcast::Sender<ChatMessage>,
+    /// Chat control plane (SSE `chat_typing`): humans typing in a thread.
+    pub chat_ctl_tx: broadcast::Sender<TypingEvent>,
+    /// A2A task inbox: lifecycle derived from routed message/send traffic.
+    pub tasks: crate::tasks::Tasks,
     /// Monotonic chat message id (survives restart via chat.jsonl tail).
     pub chat_seq: std::sync::atomic::AtomicU64,
     pub limiter: RateLimiter,
@@ -649,6 +701,7 @@ impl App {
         let (log_tx, _) = broadcast::channel(256);
         let (peers_tx, _) = broadcast::channel(64);
         let (chat_tx, _) = broadcast::channel(64);
+        let (chat_ctl_tx, _) = broadcast::channel(32);
         // Reload the messenger history: ring gets the tail, chat_seq stays
         // monotonic via the MAX id across the whole file (ids may reset in
         // files written before the newline fix).
@@ -672,6 +725,9 @@ impl App {
         // KPIs, the flow log, and peer activity survive restarts (history
         // lives in routing.jsonl; the ring is only the last RING_CAP).
         let mut routes = crate::admin::read_routing_log(&data_dir);
+        // Task inbox is derived from the same audit trail (full file, not
+        // just the ring tail — tasks live longer than the ring window).
+        let tasks = crate::tasks::Tasks::derive(&routes);
         let ring_seed: VecDeque<RouteEntry> = routes
             .drain(routes.len().saturating_sub(RING_CAP)..)
             .collect();
@@ -688,6 +744,8 @@ impl App {
             peers_tx,
             chat_ring: RwLock::new(chat_tail.into_iter().collect()),
             chat_tx,
+            chat_ctl_tx,
+            tasks,
             chat_seq: std::sync::atomic::AtomicU64::new(chat_seq),
             limiter: RateLimiter::default(),
             http,
@@ -779,6 +837,8 @@ impl App {
             ring.pop_front();
         }
         ring.push_back(e.clone());
+        drop(ring);
+        self.tasks.observe(&e).await;
         let _ = self.log_tx.send(e);
     }
 
@@ -945,7 +1005,9 @@ impl App {
 /// Load chat.jsonl: ALL newline-delimited records, oldest first. Corrupt
 /// lines are skipped. (Pre-fix files may hold one giant concatenated line —
 /// repair tooling splits those; this loader only reads proper NDJSON.)
-fn read_chat_records(data_dir: &std::path::Path) -> Vec<ChatMessage> {
+/// Full chat history from chat.jsonl (oldest first). Missing/corrupt tail
+/// lines skipped — same contract as read_routing_log.
+pub(crate) fn read_chat_records(data_dir: &std::path::Path) -> Vec<ChatMessage> {
     let path = data_dir.join("chat.jsonl");
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return Vec::new();

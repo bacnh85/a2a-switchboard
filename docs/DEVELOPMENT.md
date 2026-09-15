@@ -2,38 +2,59 @@
 
 ## Build & test
 
+The console is a Preact + TypeScript SPA in `ui/` (Vite). Node is required to
+build it; `build.rs` stubs `ui/dist/` so plain `cargo build`/`test` still work
+without Node.
+
 ```bash
+# console UI (once, and after any ui/ change)
+npm --prefix ui ci
+npm --prefix ui run build          # typecheck + bundle into ui/dist
+npm --prefix ui test               # vitest unit tests (formatters, markdown)
+
+# backend
 cargo build --release              # static binary with embedded UI
 cargo fmt --check                  # formatting
 cargo clippy --all-targets -- -D warnings
 cargo test --test gateway -- --test-threads=1   # SSE/broadcast tests are timing-sensitive
 ```
 
-The test suite is 12 integration tests covering admission, proxy, channel
-roundtrip, impersonation resistance, and size caps — using `tower::ServiceExt::oneshot`
-against the router with two fake in-process peers.
+UI live-reload development: run `cargo run` and `npm --prefix ui run dev`
+(Vite on :5173, proxying `/api` to :9920) side by side; release builds embed
+`ui/dist/` via rust-embed, so `cargo run` in debug picks up `npm run build`
+output without a recompile.
+
+The integration suite (~70 tests in `tests/gateway.rs`) covers admission,
+proxy, channel roundtrip, impersonation resistance, size caps, the JSON API,
+the task inbox (derive/reply/cancel), chat history/typing, notifications, and
+the summary windows — using `tower::ServiceExt::oneshot` against the router
+with fake in-process peers.
 
 ## Architecture
 
 ```
 src/
 ├── main.rs     — entry, config load, token first-run echo, router assembly
-├── lib.rs      — crate root: router() + embedded asset serving
+├── lib.rs      — crate root: router() + embedded ui/dist serving + SPA shell
 ├── config.rs   — config.toml + AGW_* env overrides
-├── state.rs    — App (tokens, peers, routing-log ring, rate limiter, channels),
-│                 persistence (atomic state.json), RouteEntry
+├── state.rs    — App (tokens, peers, rings, rate limiter, channels, task
+│                 store), persistence (atomic state.json), RouteEntry
 ├── auth.rs     — constant-time token classify, ClientIp extractor, error bodies
 ├── peers.rs    — /register (pending|auto-accept), .well-known directory,
 │                 dual-mode proxy (direct HTTP | channel), deregister
 ├── channel.rs  — reverse channel: Channels registry (mpsc + per-conn secret),
 │                 /channel SSE, /channel/response, CleanupStream, size caps
-├── chat.rs     — messenger: built-in gateway agent, rooms, chat JSON API,
-│                 human peer forms; text extraction from A2A message/send
+├── chat.rs     — messenger: built-in gateway agent, rooms, history/typing,
+│                 human identities; text extraction from A2A message/send
+├── tasks.rs    — A2A task inbox: derive from routed message/send, list/
+│                 detail/reply/cancel endpoints
+├── api.rs      — admin JSON API: /api/summary, /api/peers, /api/logs,
+│                 /api/notifications, /api/settings + admission actions
 ├── health.rs   — periodic probe; live channel = healthy
-└── admin.rs    — dashboard/peers/logs/graph/settings pages + SSE + actions
-templates/      — Askama compiled templates (inherits layout.html)
-assets/         — app.css (token system), graph.js, vendored htmx/vis-network
-tests/          — integration tests
+└── admin.rs    — SSE stream, /metrics, JSONL export, legacy form actions
+ui/              — console SPA (Preact + TypeScript + Vite; built to ui/dist,
+                 embedded via rust-embed)
+tests/           — integration tests
 ```
 
 Data flow for a proxied call:

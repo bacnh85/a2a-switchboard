@@ -6,3 +6,6 @@ data/
 .env.local
 .agents/plans
 .pi
+# console UI (build artifacts + node toolchain)
+ui/dist/
+ui/node_modules/

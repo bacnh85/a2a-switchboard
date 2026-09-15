@@ -17,6 +17,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build console UI
+        run: npm --prefix ui ci && npm --prefix ui run build
+      - name: UI unit tests
+        run: npm --prefix ui test
       - name: Format
         run: cargo fmt --check
       - name: Clippy

@@ -2,6 +2,13 @@
 # a2a-switchboard — multi-stage build; the runtime image carries ONLY the
 # binary + CA certs (rust-embed compiles templates/assets into the binary).
 
+FROM node:22 AS ui
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
+COPY ui ./
+RUN npm run build
+
 FROM rust:1.97 AS build
 WORKDIR /src
 
@@ -12,10 +19,11 @@ RUN mkdir -p src && echo 'fn main(){}' > src/main.rs \
 RUN rm -rf src
 
 COPY src ./src
-COPY templates ./templates
-COPY assets ./assets
+COPY build.rs ./
 COPY config.toml.example ./
-RUN cargo build --release
+# build.rs stubs ui/dist when missing; overwrite with the real console build
+COPY --from=ui /ui/dist ./ui/dist
+RUN touch build.rs && cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update \

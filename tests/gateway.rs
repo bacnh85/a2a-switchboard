@@ -819,13 +819,14 @@ async fn admin_password_flow() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
-    // wrong password
+    // wrong password -> redirect back to the login page (SPA re-reads it)
     let r = router
         .clone()
         .oneshot(form_req("POST", "/login", "password=nope12345"))
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::OK); // error re-render
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert_eq!(r.headers().get("location").unwrap(), "/login?error=wrong");
 
     // right password -> session cookie
     let r = router
@@ -943,11 +944,11 @@ async fn login_rate_limited() {
         .oneshot(form_req("POST", "/login", "password=password123"))
         .await
         .unwrap();
-    let body = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(
-        html.contains("too many attempts"),
-        "expected rate-limit error"
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        r.headers().get("location").unwrap(),
+        "/login?error=rate",
+        "expected rate-limit redirect"
     );
 }
 
@@ -1482,6 +1483,8 @@ async fn sse_stream_terminates_after_logout() {
                 preview: None,
                 resp_preview: None,
                 task_state: None,
+                task_id: None,
+                context_id: None,
             })
             .await;
         if let Some(Ok(chunk)) = stream.next().await {
@@ -1583,9 +1586,9 @@ async fn audit_extract_unit() {
 
 #[tokio::test]
 async fn audit_endpoints_require_admin_session() {
-    // With a password set, /logs/full and /logs/export must redirect to
-    // /login for unauthenticated GETs (audit trail stays private), and
-    // serve normally with a valid session.
+    // With a password set, /logs/full (SPA) and /logs/export must redirect to
+    // /login for unauthenticated GETs (audit trail stays private), /api/logs
+    // gets 401 JSON, and everything serves normally with a valid session.
     let (router, app, _gw, _boot) = test_app().await;
     app.set_admin_password(None, "password123").await.unwrap();
 
@@ -1598,6 +1601,12 @@ async fn audit_endpoints_require_admin_session() {
         assert_eq!(r.status(), StatusCode::SEE_OTHER, "{uri} must gate");
         assert_eq!(r.headers().get("location").unwrap(), "/login");
     }
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/logs", None, None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "/api/logs must 401");
 
     let r = router
         .clone()
@@ -1624,21 +1633,23 @@ async fn audit_endpoints_require_admin_session() {
         .unwrap()
         .contains("attachment"));
 
-    // authed /logs/full renders the page too
+    // authed /api/logs returns the JSON audit feed
     let r = router
         .clone()
-        .oneshot(req("GET", "/logs/full", None, None).with_header("cookie", &sid))
+        .oneshot(req("GET", "/api/logs", None, None).with_header("cookie", &sid))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
-    assert!(String::from_utf8_lossy(&b).contains("Communication log"));
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert!(v["entries"].is_array());
+    assert!(v["total_matched"].is_u64());
 }
 
 #[tokio::test]
 async fn old_format_routing_log_still_parses() {
     // Pre-audit-field routing.jsonl lines (no rpc_method/rpc_id/preview)
-    // must still render in /logs/full — serde default regression guard.
+    // must still surface in /api/logs — serde default regression guard.
     let (router, app, _gw, _boot) = test_app().await;
     std::fs::write(
         app.data_dir.join("routing.jsonl"),
@@ -1647,23 +1658,28 @@ async fn old_format_routing_log_still_parses() {
     .unwrap();
     let r = router
         .clone()
-        .oneshot(req("GET", "/logs/full", None, None))
+        .oneshot(req("GET", "/api/logs", None, None))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
-    let html = String::from_utf8_lossy(&b);
-    assert!(html.contains("legacy-a"), "old-format entry must render");
-    assert!(html.contains("POST"));
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        v["entries"][0]["src"], "legacy-a",
+        "old-format entry must render"
+    );
+    assert_eq!(v["entries"][0]["method"], "POST");
 
     // filter still works over legacy lines
     let r = router
         .clone()
-        .oneshot(req("GET", "/logs/full?src=nosuch", None, None))
+        .oneshot(req("GET", "/api/logs?src=nosuch", None, None))
         .await
         .unwrap();
     let b = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
-    assert!(String::from_utf8_lossy(&b).contains("No matching entries"));
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["entries"].as_array().unwrap().len(), 0);
+    assert_eq!(v["total_matched"], 0);
 }
 
 #[tokio::test]
@@ -2189,6 +2205,8 @@ async fn routing_log_rotation_and_perm() {
         preview: None,
         resp_preview: None,
         task_state: None,
+        task_id: None,
+        context_id: None,
     };
     for _ in 0..60 {
         app.log_route(entry.clone()).await;
@@ -2517,6 +2535,8 @@ async fn peer_detail_direction_filter() {
         preview: None,
         resp_preview: None,
         task_state: None,
+        task_id: None,
+        context_id: None,
     })
     .await;
 
@@ -2526,46 +2546,44 @@ async fn peer_detail_direction_filter() {
 
     let r = router
         .clone()
-        .oneshot(req("GET", "/peers/fake", None, None).with_header("cookie", &sid))
+        .oneshot(req("GET", "/api/peers/fake", None, None).with_header("cookie", &sid))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let b = axum::body::to_bytes(r.into_body(), 262144).await.unwrap();
-    let html = String::from_utf8_lossy(&b);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
     assert!(
-        html.contains("other-peer"),
+        serde_json::to_string(&v["traffic"])
+            .unwrap()
+            .contains("other-peer"),
         "all-direction shows both entries"
     );
-    assert!(
-        html.contains("/logs/full?dst=fake"),
-        "default deep link follows dst"
-    );
 
     let r = router
         .clone()
-        .oneshot(req("GET", "/peers/fake?dir=out", None, None).with_header("cookie", &sid))
+        .oneshot(req("GET", "/api/peers/fake?dir=out", None, None).with_header("cookie", &sid))
         .await
         .unwrap();
     let b = axum::body::to_bytes(r.into_body(), 262144).await.unwrap();
-    let html = String::from_utf8_lossy(&b);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
     assert!(
-        html.contains("other-peer"),
+        serde_json::to_string(&v["traffic"])
+            .unwrap()
+            .contains("other-peer"),
         "out direction shows fake as src"
     );
-    assert!(
-        html.contains("/logs/full?src=fake"),
-        "out deep link uses src"
-    );
 
     let r = router
         .clone()
-        .oneshot(req("GET", "/peers/fake?dir=in", None, None).with_header("cookie", &sid))
+        .oneshot(req("GET", "/api/peers/fake?dir=in", None, None).with_header("cookie", &sid))
         .await
         .unwrap();
     let b = axum::body::to_bytes(r.into_body(), 262144).await.unwrap();
-    let html = String::from_utf8_lossy(&b);
+    let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
     assert!(
-        !html.contains("other-peer"),
+        !serde_json::to_string(&v["traffic"])
+            .unwrap()
+            .contains("other-peer"),
         "in direction must exclude entries where fake is only the src"
     );
 }
@@ -2660,43 +2678,44 @@ async fn fragments_require_admin_and_render() {
         .await
         .unwrap();
 
-    // Admin unset → UI open: fragments render as bare partials (no layout).
-    for path in [
-        "/peers?fragment=1",
-        "/peers/fake?fragment=1",
-        "/logs/full?fragment=1",
-    ] {
+    // Admin unset → console open: SPA pages serve the shell, /api feeds JSON.
+    for path in ["/peers", "/peers/fake", "/logs", "/api/peers", "/api/logs"] {
         let r = router
             .clone()
             .oneshot(req("GET", path, None, None))
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "{path}");
-        let body =
-            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
-                .into_owned();
-        assert!(!body.contains("<!DOCTYPE"), "{path} leaked layout");
-        assert!(!body.contains("<nav"), "{path} leaked layout");
+        assert!(!r.status().is_server_error(), "{path} must not error");
     }
     let r = router
         .clone()
-        .oneshot(req("GET", "/peers?fragment=1", None, None))
+        .oneshot(req("GET", "/api/peers", None, None))
         .await
         .unwrap();
     let body =
         String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
             .into_owned();
-    assert!(body.contains("Accepted"));
+    assert!(body.contains("\"accepted\""), "peers feed shape: {body}");
+    assert!(body.contains("fake"), "registered peer present");
 
-    // Admin set → locks; fragments follow the same admin gate as full pages.
+    // Admin set → locks: HTML pages redirect, /api gets 401 JSON.
     let pw = app.ensure_admin_password().await.unwrap();
+    for path in ["/peers", "/logs"] {
+        let r = router
+            .clone()
+            .oneshot(req("GET", path, None, None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SEE_OTHER, "{path}");
+        assert_eq!(r.headers().get("location").unwrap(), "/login");
+    }
     let r = router
         .clone()
-        .oneshot(req("GET", "/peers?fragment=1", None, None))
+        .oneshot(req("GET", "/api/peers", None, None))
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::SEE_OTHER);
-    assert_eq!(r.headers().get("location").unwrap(), "/login");
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
     let r = router
         .clone()
@@ -2704,46 +2723,24 @@ async fn fragments_require_admin_and_render() {
         .await
         .unwrap();
     let cookie = cookie_of(&r).unwrap();
-    for path in [
-        "/peers?fragment=1",
-        "/peers/fake?fragment=1",
-        "/logs/full?fragment=1",
-    ] {
+    // authed: shell pages render + feeds return data
+    for path in ["/peers", "/logs", "/api/peers", "/api/logs"] {
         let r = router
             .clone()
             .oneshot(req("GET", path, None, None).with_header("cookie", &cookie))
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "{path}");
-        let body =
-            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
-                .into_owned();
-        assert!(!body.contains("<!DOCTYPE"), "{path} leaked layout");
     }
-    // Pages carry the live-update wiring.
-    for path in ["/peers", "/logs/full"] {
-        let r = router
-            .clone()
-            .oneshot(req("GET", path, None, None).with_header("cookie", &cookie))
-            .await
-            .unwrap();
-        let body =
-            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
-                .into_owned();
-        assert!(body.contains("data-live"), "{path} missing data-live");
-        assert!(body.contains("/assets/live.js"), "{path} missing live.js");
-    }
-    // Caption renders exactly once (page includes the partial; no dupes).
     let r = router
         .clone()
-        .oneshot(req("GET", "/logs/full", None, None).with_header("cookie", &cookie))
+        .oneshot(req("GET", "/api/peers/fake", None, None).with_header("cookie", &cookie))
         .await
         .unwrap();
     let body =
         String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
             .into_owned();
-    assert_eq!(body.matches("entries (newest first)").count(), 1);
-    assert_eq!(body.matches("matching entries from").count(), 0);
+    assert!(body.contains("\"peer\""), "peer detail shape: {body}");
 }
 
 #[tokio::test]
@@ -2763,19 +2760,21 @@ async fn logs_fragment_honors_filters() {
             preview: None,
             resp_preview: None,
             task_state: None,
+            task_id: None,
+            context_id: None,
         })
         .await;
     }
     let r = router
         .clone()
-        .oneshot(req("GET", "/logs/full?src=alice&fragment=1", None, None))
+        .oneshot(req("GET", "/api/logs?src=alice", None, None))
         .await
         .unwrap();
     let body =
         String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap())
             .into_owned();
     assert!(body.contains("alice"));
-    assert!(!body.contains("bob"), "fragment ignored the src filter");
+    assert!(!body.contains("bob"), "feed ignored the src filter");
 }
 
 // ----- human peers, gateway agent, chat / messenger -----
@@ -3802,6 +3801,8 @@ fn task_state_display_mapping() {
         preview: None,
         resp_preview: None,
         task_state: t.map(String::from),
+        task_id: None,
+        context_id: None,
     };
     assert_eq!(
         e(Some("TASK_STATE_COMPLETED")).task_state_display(),
@@ -3853,25 +3854,28 @@ async fn peers_ui_three_state_health_and_activity() {
         ))
         .await
         .unwrap();
-    // healthy == None → "unknown", never a red "unreachable".
+    // healthy == None → null in the feed, never unhealthy.
     let r = router
         .clone()
-        .oneshot(req("GET", "/peers?fragment=1", None, None))
+        .oneshot(req("GET", "/api/peers", None, None))
         .await
         .unwrap();
-    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let b = String::from_utf8_lossy(&body);
-    assert!(b.contains(">unknown<"), "unknown health state: {b}");
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let accepted = v["accepted"].as_array().unwrap();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0]["peer"]["name"], "alpha");
     assert!(
-        !b.contains("unreachable"),
-        "None must not render as unreachable"
+        accepted[0]["peer"]["healthy"].is_null(),
+        "unknown health state"
     );
-    assert!(b.contains("Admitted"), "source column renamed: {b}");
-    assert!(b.contains("Activity"), "activity column present: {b}");
+    assert_eq!(accepted[0]["peer"]["state"], "accepted");
 
-    // Ring traffic → activity count renders.
+    // Ring traffic → activity count + series in the feed.
     app.log_route(a2a_switchboard::state::RouteEntry {
         ts: a2a_switchboard::state::now(),
         src: "alpha".into(),
@@ -3885,31 +3889,38 @@ async fn peers_ui_three_state_health_and_activity() {
         preview: None,
         resp_preview: None,
         task_state: None,
+        task_id: None,
+        context_id: None,
     })
     .await;
     let r = router
         .clone()
-        .oneshot(req("GET", "/peers?fragment=1", None, None))
+        .oneshot(req("GET", "/api/peers", None, None))
         .await
         .unwrap();
-    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let b = String::from_utf8_lossy(&body);
-    assert!(b.contains("1/h"), "activity count: {b}");
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["accepted"][0]["reqs_1h"], 1, "activity count");
+    assert_eq!(v["accepted"][0]["series"].as_array().unwrap().len(), 60);
 
-    // Peer detail: reverse channel "direct" (neutral), no red "no".
+    // Peer detail feed: channel flag false for direct peers.
     let r = router
         .clone()
-        .oneshot(req("GET", "/peers/alpha?fragment=1", None, None))
+        .oneshot(req("GET", "/api/peers/alpha", None, None))
         .await
         .unwrap();
-    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let b = String::from_utf8_lossy(&body);
-    assert!(b.contains(">direct<"), "reverse channel neutral state: {b}");
-    assert!(b.contains("Gateway identity"), "caller token section: {b}");
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["channel"], false, "reverse channel neutral state");
+    assert!(v["traffic"].is_array(), "traffic present");
 }
 
 #[tokio::test]
@@ -3928,23 +3939,29 @@ async fn logs_table_renders_task_and_human_units() {
         preview: None,
         resp_preview: None,
         task_state: Some("TASK_STATE_COMPLETED".into()),
+        task_id: None,
+        context_id: None,
     })
     .await;
     let r = router
         .clone()
-        .oneshot(req("GET", "/logs/full?fragment=1", None, None))
+        .oneshot(req("GET", "/api/logs", None, None))
         .await
         .unwrap();
-    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let b = String::from_utf8_lossy(&body);
-    assert!(b.contains("completed"), "task state column: {b}");
-    assert!(b.contains("5.4 s"), "human latency: {b}");
-    assert!(b.contains("271 B"), "human bytes: {b}");
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let e = &v["entries"][0];
+    assert_eq!(e["task_state"], "TASK_STATE_COMPLETED", "task state column");
+    assert_eq!(e["latency_ms"], 5_400, "raw latency (client formats 5.4 s)");
+    assert_eq!(e["bytes"], 271, "raw bytes (client formats 271 B)");
+    let s = serde_json::to_string(&v).unwrap();
     assert!(
-        !b.contains("data/routing.jsonl"),
-        "caption must not leak server paths: {b}"
+        !s.contains("data/routing.jsonl"),
+        "feed must not leak server paths: {s}"
     );
 }
 
@@ -3953,16 +3970,27 @@ async fn dashboard_red_kpis_render() {
     let (router, _app, _gw, _boot) = test_app().await;
     let r = router
         .clone()
-        .oneshot(req("GET", "/", None, None))
+        .oneshot(req("GET", "/api/summary", None, None))
         .await
         .unwrap();
-    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let b = String::from_utf8_lossy(&body);
-    assert!(b.contains("routed · last hour"), "windowed KPI: {b}");
-    assert!(b.contains("p95 latency"), "p95 KPI: {b}");
-    assert!(b.contains("peers healthy"), "fleet KPI: {b}");
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(v["routed"].is_u64(), "windowed routed KPI: {v}");
+    assert!(v["p95"].is_null() || v["p95"].is_u64(), "p95 KPI: {v}");
+    assert!(
+        v["peers_up"].is_u64() && v["peers_total"].is_u64(),
+        "fleet KPI: {v}"
+    );
+    assert_eq!(
+        v["buckets"].as_array().unwrap().len(),
+        60,
+        "60 one-minute buckets for the 1h window"
+    );
+    assert!(v["recent"].is_array(), "recent flow entries: {v}");
 }
 
 #[tokio::test]
@@ -3983,20 +4011,647 @@ async fn fleet_kpi_excludes_revoked_peers() {
     a2a_switchboard::health::apply_health(&app, "alpha", true, None).await;
     let _ = router
         .clone()
-        .oneshot(req("POST", "/peers/alpha/revoke", None, None))
+        .oneshot(req("POST", "/api/peers/alpha/revoke", None, None))
         .await
         .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/summary", None, None))
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        v["peers_up"], 0,
+        "revoked healthy peer must not count as up"
+    );
+    assert_eq!(
+        v["peers_total"], 0,
+        "revoked peers excluded from fleet total"
+    );
+}
+
+// ----- 0.8.0 console: task inbox, chat upgrades, notifications, summary -----
+
+/// Spawn an upstream peer that replies with a custom A2A result envelope and
+/// records every request body it receives. Returns (addr, received bodies).
+async fn spawn_task_peer(
+    reply: serde_json::Value,
+) -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let received: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let recv = received.clone();
+    let fake = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let recv = recv.clone();
+            let reply = reply.clone();
+            async move {
+                recv.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).to_string());
+                axum::Json(reply.clone())
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    (addr, received)
+}
+
+#[tokio::test]
+async fn task_inbox_derives_state_from_routed_sends() {
+    let reply = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"kind": "task", "id": "task-xyz", "contextId": "ctx-1",
+                   "status": {"state": "TASK_STATE_INPUT_REQUIRED"}}
+    });
+    let (addr, _recvd) = spawn_task_peer(reply).await;
+    let (router, _app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"agentx","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/agentx/",
+            Some(&boot),
+            Some(r#"{"jsonrpc":"2.0","method":"message/send","params":{"message":{"kind":"message","messageId":"m1","contextId":"ctx-1","parts":[{"kind":"text","text":"hello"}]}}}"#),
+        ))
+        .await
+        .unwrap();
+
+    // The inbox lists the task with its a2a id, input-required state.
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/tasks?state=input-required", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["tasks"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["tasks"][0]["id"], "task-xyz");
+    assert_eq!(v["tasks"][0]["state"], "input-required");
+    assert_eq!(v["tasks"][0]["context_id"], "ctx-1");
+    assert_eq!(v["tasks"][0]["a2a"], true);
+    assert_eq!(v["tasks"][0]["dst"], "agentx");
+
+    // The closed filter must NOT include it (it's still active).
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/tasks?state=closed", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["tasks"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn task_reply_delivers_followup_on_context() {
+    let reply = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"kind": "task", "id": "task-ans", "contextId": "ctx-9",
+                   "status": {"state": "TASK_STATE_INPUT_REQUIRED"}}
+    });
+    let (addr, recvd) = spawn_task_peer(reply).await;
+    let (router, _app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"agentx","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/agentx/",
+            Some(&boot),
+            Some(r#"{"jsonrpc":"2.0","method":"message/send","params":{"message":{"kind":"message","messageId":"m1","contextId":"ctx-9","parts":[{"kind":"text","text":"need input?"}]}}}"#),
+        ))
+        .await
+        .unwrap();
+
+    // The operator identity answers the task.
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/settings/humans",
+            None,
+            Some(r#"{"name":"HB"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/tasks/task-ans/reply",
+            None,
+            Some(r#"{"as":"HB","text":"42 degrees"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    assert_eq!(v["ok"], true, "{v}");
+
+    // The fake agent received a second message/send on the same context.
+    let bodies = recvd.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "follow-up must be delivered: {bodies:?}");
+    let second = &bodies[1];
+    assert!(second.contains("message/send"), "{second}");
+    assert!(second.contains("ctx-9"), "context id carried: {second}");
+    assert!(
+        second.contains("42 degrees"),
+        "reply text carried: {second}"
+    );
+}
+
+#[tokio::test]
+async fn task_cancel_sends_tasks_cancel_and_closes() {
+    // Cancel-aware fake: message/send reports the task working, tasks/cancel
+    // reports it canceled (a real agent echoes the new lifecycle state).
+    let working = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"kind": "task", "id": "task-c", "contextId": "ctx-c",
+                   "status": {"state": "TASK_STATE_WORKING"}}
+    });
+    let canceled = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"kind": "task", "id": "task-c", "contextId": "ctx-c",
+                   "status": {"state": "TASK_STATE_CANCELED"}}
+    });
+    let fake = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let working = working.clone();
+            let canceled = canceled.clone();
+            async move {
+                let s = String::from_utf8_lossy(&body);
+                if s.contains("tasks/cancel") {
+                    axum::Json(canceled)
+                } else {
+                    axum::Json(working)
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    let (router, _app, _gw, boot) = test_app().await;
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"agentx","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/peer/agentx/",
+            Some(&boot),
+            Some(r#"{"jsonrpc":"2.0","method":"message/send","params":{}}"#),
+        ))
+        .await
+        .unwrap();
+
+    let r = router
+        .clone()
+        .oneshot(req("POST", "/api/tasks/task-c/cancel", None, None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    assert_eq!(v["task"]["state"], "canceled", "{v}");
+
+    // It moved to the closed bucket.
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/tasks?state=closed", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["tasks"][0]["id"], "task-c");
+}
+
+#[tokio::test]
+async fn chat_history_pages_beyond_the_ring_window() {
+    let (router, app, _gw, _boot) = test_app().await;
+    // 250 messages in one conversation: the thread endpoint caps at 200 and
+    // flags has_older; history pages the rest out of the store.
+    for i in 0..250 {
+        app.log_chat(a2a_switchboard::state::ChatMessage {
+            id: 0,
+            ts: a2a_switchboard::state::now(),
+            conv: "dm:a|b".into(),
+            src: if i % 2 == 0 { "a" } else { "b" }.into(),
+            text: format!("msg {i}"),
+            kind: "chat".into(),
+            status: "ok".into(),
+            error: None,
+        })
+        .await;
+    }
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/chat/messages?conv=dm:a%7Cb", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    let msgs = v["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 200);
+    assert_eq!(v["has_older"], true);
+
+    let first_id = msgs[0]["id"].as_u64().unwrap();
+    let r = router
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/api/chat/history?conv=dm:a%7Cb&before_id={first_id}&n=500"),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    let older = v["messages"].as_array().unwrap();
+    assert_eq!(older.len(), 50, "the remaining 50 messages page out: {v}");
+    assert_eq!(v["has_older"], false);
+}
+
+#[tokio::test]
+async fn chat_typing_broadcasts_control_event() {
+    let (router, app, _gw, _boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/settings/humans",
+            None,
+            Some(r#"{"name":"HB"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    let mut rx = app.chat_ctl_tx.subscribe();
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/chat/typing",
+            None,
+            Some(r#"{"conv":"dm:HB|gateway","as":"HB"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let ev = rx.try_recv().expect("typing event broadcast");
+    assert_eq!(ev.conv, "dm:HB|gateway");
+    assert_eq!(ev.src, "HB");
+}
+
+#[tokio::test]
+async fn room_create_and_delete_via_api() {
+    let (router, app, _gw, boot) = test_app().await;
+    // a human + an agent member
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/settings/humans",
+            None,
+            Some(r#"{"name":"HB"}"#),
+        ))
+        .await
+        .unwrap();
+    let fake = axum::Router::new().route("/", axum::routing::post(|| async { "ok" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    // bootstrap token auto-accepts — room members must be accepted peers
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&boot),
+            Some(&format!(r#"{{"name":"agentx","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/chat/rooms",
+            None,
+            Some(r#"{"name":"ops","members":["HB","agentx"],"as":"HB"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    let room_id = v["room"]["id"].as_str().unwrap().to_string();
+    assert!(app.inner.read().await.rooms.iter().any(|r| r.id == room_id));
+
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/chat/rooms/{room_id}/members"),
+            None,
+            Some(r#"{"add":[],"remove":["agentx"]}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(!app
+        .inner
+        .read()
+        .await
+        .rooms
+        .iter()
+        .any(|r| r.id == room_id && r.members.contains(&"agentx".to_string())));
+
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/api/chat/rooms/{room_id}/delete"),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(!app.inner.read().await.rooms.iter().any(|r| r.id == room_id));
+}
+
+#[tokio::test]
+async fn notifications_feed_surfaces_pending_approvals() {
+    let (router, app, gw, _boot) = test_app().await;
+    let fake = axum::Router::new().route("/", axum::routing::post(|| async { "ok" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    let _ = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/register",
+            Some(&gw),
+            Some(&format!(r#"{{"name":"agentx","url":"http://{addr}/"}}"#)),
+        ))
+        .await
+        .unwrap();
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/notifications", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    let kinds: Vec<&str> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"pending"), "pending approval alert: {v}");
+    assert_eq!(v["total"], 1);
+
+    // Accept → the alert clears.
+    let _ = router
+        .clone()
+        .oneshot(req("POST", "/api/peers/agentx/accept", None, None))
+        .await
+        .unwrap();
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/notifications", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["total"], 0, "accepted peer clears the alert: {v}");
+
+    // Unhealthy accepted agents surface too.
+    a2a_switchboard::health::apply_health(&app, "agentx", false, None).await;
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/notifications", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    let kinds: Vec<&str> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"unhealthy"), "{v}");
+}
+
+#[tokio::test]
+async fn summary_window_reads_the_persistent_log() {
+    let (router, app, _gw, _boot) = test_app().await;
+    // One fresh entry (ring + file) and one from 2h ago (file only).
+    let mk = |ts: i64, src: &str| a2a_switchboard::state::RouteEntry {
+        ts,
+        src: src.into(),
+        dst: "w".into(),
+        method: "POST".into(),
+        status: 200,
+        bytes: 1,
+        latency_ms: 3,
+        rpc_method: None,
+        rpc_id: None,
+        preview: None,
+        resp_preview: None,
+        task_state: None,
+        task_id: None,
+        context_id: None,
+    };
+    app.log_route(mk(a2a_switchboard::state::now(), "fresh"))
+        .await;
+    let old = mk(a2a_switchboard::state::now() - 7200, "stale");
+    app.log_route(old).await;
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/summary", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["routed"], 1, "1h window excludes the 2h-old entry: {v}");
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/summary?window=6h", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["routed"], 2, "6h window includes both: {v}");
+    assert_eq!(v["buckets"].as_array().unwrap().len(), 360);
+}
+
+#[tokio::test]
+async fn json_login_flow_and_gate() {
+    let (router, app, _gw, _boot) = test_app().await;
+    app.set_admin_password(None, "password123").await.unwrap();
+
+    // unauthenticated API -> 401 JSON
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/summary", None, None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    // wrong password -> 401 with error body
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/login",
+            None,
+            Some(r#"{"password":"nope"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    // right password -> cookie + ok
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/login",
+            None,
+            Some(r#"{"password":"password123"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let cookie = cookie_of(&r).unwrap();
+    assert!(cookie.starts_with("agw_session="));
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/auth/ok", None, None).with_header("cookie", &cookie))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["password_set"], true);
+    assert!(v["version"].as_str().unwrap().starts_with("0."));
+
+    // SPA shell pages are session-gated: unauth redirects, authed serves.
     let r = router
         .clone()
         .oneshot(req("GET", "/", None, None))
         .await
         .unwrap();
-    let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/", None, None).with_header("cookie", &cookie))
         .await
         .unwrap();
-    let b = String::from_utf8_lossy(&body);
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn api_settings_exposes_tokens_and_humans() {
+    let (router, _app, _gw, _boot) = test_app().await;
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/settings", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert!(!v["gateway_token"].as_str().unwrap().is_empty());
+    assert!(!v["bootstrap_token"].as_str().unwrap().is_empty());
+    assert_eq!(v["password_set"], false);
+    assert_eq!(v["humans"].as_array().unwrap().len(), 0);
+
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/settings/humans",
+            None,
+            Some(r#"{"name":"HB"}"#),
+        ))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
     assert!(
-        b.contains(">0/0<"),
-        "revoked healthy peer must not count as up: {b}"
+        v["token"].as_str().unwrap().starts_with("agw_"),
+        "token shown once: {v}"
     );
+
+    // duplicate -> 409
+    let r = router
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/api/settings/humans",
+            None,
+            Some(r#"{"name":"HB"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/settings", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["humans"].as_array().unwrap().len(), 1);
+    assert_eq!(v["humans"][0]["name"], "HB");
+
+    let r = router
+        .clone()
+        .oneshot(req("POST", "/api/settings/humans/HB/delete", None, None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = router
+        .clone()
+        .oneshot(req("GET", "/api/settings", None, None))
+        .await
+        .unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["humans"].as_array().unwrap().len(), 0);
 }

@@ -9,11 +9,10 @@ use crate::peers::{caller_label, deliver, resolve_caller, Caller};
 use crate::state::{
     dm_conv, fingerprint, gen_token, now, AppState, ChatMessage, Peer, PeerKind, PeerState, Room,
 };
-use askama::Template;
 use axum::body::Bytes;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -308,7 +307,7 @@ pub async fn gateway_agent(
     let reply = command_reply(&app, &caller_name.0, caller_name.1, &text).await;
     let envelope = agent_envelope(id, &reply);
     let envelope_bytes = serde_json::to_vec(&envelope).unwrap_or_default();
-    let (task_state, resp_preview) = crate::state::audit_extract_response(&envelope_bytes);
+    let (task_state, task_id, resp_preview) = crate::state::audit_extract_response(&envelope_bytes);
     let audit = crate::state::audit_extract(&body);
 
     // Mirror into the messenger store (human-typed text is always stored).
@@ -350,6 +349,8 @@ pub async fn gateway_agent(
         preview: audit.preview,
         resp_preview,
         task_state,
+        task_id,
+        context_id: audit.context_id,
     })
     .await;
 
@@ -368,12 +369,17 @@ pub struct HumanForm {
 /// POST /settings/humans (form) — create a human operator identity:
 /// auto-accepted, no upstream endpoint, mints the token shared between that
 /// human and the gateway (its caller_token).
-pub async fn create_human(State(app): State<AppState>, Form(f): Form<HumanForm>) -> Response {
-    let name = f.name.trim().to_string();
+/// Core human-identity creation shared by the form handler and the JSON API.
+/// Returns the freshly minted caller token (shown once).
+pub(crate) async fn create_human_core(
+    app: &AppState,
+    raw_name: &str,
+) -> Result<String, &'static str> {
+    let name = raw_name.trim().to_string();
     if name == "gateway" {
         // Reserved: would shadow the built-in switchboard agent (DM routing
         // and token attribution both key on the name).
-        return Redirect::to("/settings?human=name").into_response();
+        return Err("reserved name");
     }
     if name.is_empty()
         || name.len() > 64
@@ -381,14 +387,14 @@ pub async fn create_human(State(app): State<AppState>, Form(f): Form<HumanForm>)
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
-        return Redirect::to("/settings?human=name").into_response();
+        return Err("invalid name");
     }
+    let token = gen_token();
     {
         let mut inner = app.inner.write().await;
         if inner.peers.iter().any(|p| p.name == name) {
-            return Redirect::to("/settings?human=duplicate").into_response();
+            return Err("duplicate");
         }
-        let token = gen_token();
         inner.peers.push(Peer {
             name: name.clone(),
             kind: PeerKind::Human,
@@ -401,7 +407,7 @@ pub async fn create_human(State(app): State<AppState>, Form(f): Form<HumanForm>)
             state: PeerState::Accepted,
             fingerprint: fingerprint(&token),
             upstream_token: None,
-            caller_token: Some(token),
+            caller_token: Some(token.clone()),
             registered_at: now(),
             last_seen: None,
             last_ip: None,
@@ -415,7 +421,15 @@ pub async fn create_human(State(app): State<AppState>, Form(f): Form<HumanForm>)
     }
     app.persist().await;
     app.emit_peers("register", &name);
-    Redirect::to("/settings").into_response()
+    Ok(token)
+}
+
+pub async fn create_human(State(app): State<AppState>, Form(f): Form<HumanForm>) -> Response {
+    match create_human_core(&app, &f.name).await {
+        Ok(_) => Redirect::to("/settings").into_response(),
+        Err("duplicate") => Redirect::to("/settings?human=duplicate").into_response(),
+        Err(_) => Redirect::to("/settings?human=name").into_response(),
+    }
 }
 
 /// POST /settings/humans/{name}/delete (form) — remove a human identity.
@@ -435,26 +449,7 @@ pub async fn delete_human(State(app): State<AppState>, Path(name): Path<String>)
     Redirect::to("/settings").into_response()
 }
 
-#[derive(Template)]
-#[template(path = "chat.html")]
-pub struct ChatTmpl {
-    pub title: &'static str,
-    pub active_nav: &'static str,
-    pub localhost: bool,
-    pub authed: bool,
-}
-
-pub async fn chat_page(State(app): State<AppState>) -> Response {
-    let t = ChatTmpl {
-        title: "Chat",
-        active_nav: "chat",
-        localhost: crate::admin::is_localhost(),
-        authed: app.admin_set().await,
-    };
-    Html(t.render().unwrap_or_default()).into_response()
-}
-
-fn err_json(status: StatusCode, msg: &str) -> Response {
+pub(crate) fn err_json(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({"error": msg}))).into_response()
 }
 
@@ -463,7 +458,7 @@ fn err_json(status: StatusCode, msg: &str) -> Response {
 // clippy 1.98+ flags the large axum Response Err; callers pass it straight
 // up as their own Response, so boxing would churn every call site.
 #[allow(clippy::result_large_err)]
-async fn resolve_human(
+pub(crate) async fn resolve_human(
     app: &AppState,
     name: Option<&str>,
 ) -> Result<(String, Option<String>), Response> {
@@ -568,16 +563,126 @@ pub struct MsgQuery {
 
 /// GET /api/chat/messages?conv=&since_id= — thread fetch for the messenger
 /// (last 200 matching bubbles, oldest first; with since_id, only newer).
+/// `has_older` says whether /api/chat/history can page back further.
 pub async fn api_messages(State(app): State<AppState>, Query(q): Query<MsgQuery>) -> Response {
-    let ring = app.chat_ring.read().await;
-    let mut msgs: Vec<&ChatMessage> = ring
-        .iter()
-        .filter(|m| m.conv == q.conv && m.id > q.since_id)
-        .collect();
-    if msgs.len() > 200 {
-        msgs = msgs.split_off(msgs.len() - 200);
+    let (msgs, ring_older) = {
+        let ring = app.chat_ring.read().await;
+        let mut msgs: Vec<&ChatMessage> = ring
+            .iter()
+            .filter(|m| m.conv == q.conv && m.id > q.since_id)
+            .collect();
+        let mut ring_older = false;
+        if msgs.len() > 200 {
+            let split = msgs.split_off(msgs.len() - 200);
+            ring_older = true;
+            msgs = split;
+        } else if let (Some(first), false) = (msgs.first(), q.since_id > 0) {
+            ring_older = ring.iter().any(|m| m.conv == q.conv && m.id < first.id);
+        }
+        let owned: Vec<ChatMessage> = msgs.into_iter().cloned().collect();
+        (owned, ring_older)
+    };
+    let has_older = if msgs.is_empty() {
+        false
+    } else if ring_older {
+        true
+    } else {
+        let first_id = msgs[0].id;
+        let dir = app.data_dir.clone();
+        let conv = q.conv.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::state::read_chat_records(&dir)
+                .iter()
+                .any(|m| m.conv == conv && m.id < first_id)
+        })
+        .await
+        .unwrap_or(false)
+    };
+    Json(serde_json::json!({ "messages": msgs, "has_older": has_older })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    conv: String,
+    before_id: u64,
+    #[serde(default)]
+    n: Option<usize>,
+}
+
+/// GET /api/chat/history?conv=&before_id=&n= — page older bubbles out of
+/// chat.jsonl (beyond the in-memory ring), oldest first.
+pub async fn api_history(State(app): State<AppState>, Query(q): Query<HistoryQuery>) -> Response {
+    let n = q.n.unwrap_or(100).clamp(1, 500);
+    let dir = app.data_dir.clone();
+    let conv = q.conv.clone();
+    let before = q.before_id;
+    let (msgs, has_older) = tokio::task::spawn_blocking(move || {
+        let mut all: Vec<ChatMessage> = crate::state::read_chat_records(&dir)
+            .into_iter()
+            .filter(|m| m.conv == conv && m.id < before)
+            .collect();
+        all.sort_by_key(|m| m.id);
+        let has_older = all.len() > n;
+        let start = all.len().saturating_sub(n);
+        (all.split_off(start), has_older)
+    })
+    .await
+    .unwrap_or((Vec::new(), false));
+    Json(serde_json::json!({ "messages": msgs, "has_older": has_older })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct TypingBody {
+    conv: String,
+    #[serde(rename = "as")]
+    as_human: Option<String>,
+}
+
+/// POST /api/chat/typing {conv, as} — real typing signal, broadcast to admin
+/// UIs as SSE `chat_typing`. DMs only (rooms would need per-member fanout).
+pub async fn api_typing(
+    State(app): State<AppState>,
+    ClientIp(client_ip): ClientIp,
+    Json(b): Json<TypingBody>,
+) -> Response {
+    if !app.limiter.allow(&format!("chat-{client_ip}"), 60) {
+        return err_json(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
     }
-    Json(serde_json::json!({ "messages": msgs })).into_response()
+    if !b.conv.starts_with("dm:") {
+        return err_json(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "typing applies to DMs only",
+        );
+    }
+    let (as_name, _) = match resolve_human(&app, b.as_human.as_deref()).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let _ = app.chat_ctl_tx.send(crate::state::TypingEvent {
+        conv: b.conv,
+        src: as_name,
+    });
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
+/// POST /api/chat/rooms/{id}/delete — remove a room entirely.
+pub async fn api_room_delete(State(app): State<AppState>, Path(id): Path<String>) -> Response {
+    let removed = {
+        let mut inner = app.inner.write().await;
+        inner
+            .rooms
+            .iter()
+            .position(|r| r.id == id)
+            .map(|i| inner.rooms.remove(i))
+    };
+    match removed {
+        Some(room) => {
+            app.persist().await;
+            app.emit_peers("room", &room.id);
+            Json(serde_json::json!({"ok": true})).into_response()
+        }
+        None => err_json(StatusCode::NOT_FOUND, "no such room"),
+    }
 }
 
 fn bubble(
@@ -600,24 +705,112 @@ fn bubble(
     }
 }
 
-/// Build an A2A message/send envelope carrying one text part.
-fn message_envelope(id: &str, text: &str) -> Bytes {
+/// Build an A2A message/send envelope carrying one text part, optionally
+/// attached to an existing A2A context/task (operator task intervention).
+fn message_envelope_ctx(
+    id: &str,
+    text: &str,
+    context_id: Option<&str>,
+    task_id: Option<&str>,
+) -> Bytes {
+    let mut msg = serde_json::json!({
+        "role": "user",
+        "messageId": id,
+        "kind": "message",
+        "parts": [{"kind": "text", "text": text}],
+    });
+    if let Some(c) = context_id {
+        msg["contextId"] = serde_json::Value::String(c.to_string());
+    }
+    if let Some(t) = task_id {
+        msg["taskId"] = serde_json::Value::String(t.to_string());
+    }
     Bytes::from(
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "message/send",
-            "params": {
-                "message": {
-                    "role": "user",
-                    "messageId": id,
-                    "kind": "message",
-                    "parts": [{"kind": "text", "text": text}],
-                }
-            }
+            "params": { "message": msg }
         })
         .to_string(),
     )
+}
+
+/// Internal JSON-RPC call to a peer through the normal dual-mode delivery —
+/// same logging and admission as proxy traffic. `record_chat` mirrors a
+/// message/send roundtrip into the messenger. Returns (status, response body).
+pub(crate) async fn internal_rpc(
+    app: &AppState,
+    target: &str,
+    from_token: Option<&str>,
+    client_ip: &str,
+    method: &str,
+    params: serde_json::Value,
+    record_chat: bool,
+) -> Result<(StatusCode, Option<String>), String> {
+    let id = format!(
+        "chat-{}-{}",
+        app.chat_seq.load(std::sync::atomic::Ordering::Relaxed),
+        &gen_token()[4..10]
+    );
+    let mut params = params;
+    if !record_chat && method == "message/send" {
+        // Keep the A2A wire shape: a message/send carries messageId even on
+        // the non-mirrored path (room fanout, roster notifications).
+        if let Some(msg) = params.get_mut("message").and_then(|m| m.as_object_mut()) {
+            msg.entry("messageId".to_string())
+                .or_insert_with(|| serde_json::Value::String(id.clone()));
+        }
+    }
+    let body = if record_chat {
+        // message/send mirror path — build the envelope from the params so
+        // context/task references survive.
+        let text = params
+            .pointer("/message/parts/0/text")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let context_id = params
+            .pointer("/message/contextId")
+            .and_then(|c| c.as_str())
+            .map(str::to_string);
+        let task_id = params
+            .pointer("/message/taskId")
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        message_envelope_ctx(&id, &text, context_id.as_deref(), task_id.as_deref())
+    } else {
+        Bytes::from(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            })
+            .to_string(),
+        )
+    };
+    let d = deliver(
+        app,
+        target,
+        from_token.unwrap_or(""),
+        client_ip,
+        "/",
+        None,
+        "POST",
+        &HeaderMap::new(),
+        body,
+        record_chat,
+    )
+    .await;
+    let status = d.resp.status();
+    if status.as_u16() >= 400 {
+        return Err(format!("HTTP {}", status.as_u16()));
+    }
+    Ok((
+        status,
+        d.body.map(|b| String::from_utf8_lossy(&b).to_string()),
+    ))
 }
 
 /// Internal message/send to a peer through the normal dual-mode delivery
@@ -631,29 +824,27 @@ pub(crate) async fn internal_send(
     client_ip: &str,
     record_chat: bool,
 ) -> Result<Option<String>, String> {
-    let id = format!(
-        "chat-{}-{}",
-        app.chat_seq.load(std::sync::atomic::Ordering::Relaxed),
-        &gen_token()[4..10]
-    );
-    let d = deliver(
+    let params = serde_json::json!({
+        "message": {
+            "role": "user",
+            "kind": "message",
+            "parts": [{"kind": "text", "text": text}],
+        }
+    });
+    let (_, body) = internal_rpc(
         app,
         target,
-        from_token.unwrap_or(""),
+        from_token,
         client_ip,
-        "/",
-        None,
-        "POST",
-        &HeaderMap::new(),
-        message_envelope(&id, text),
+        "message/send",
+        params,
         record_chat,
     )
-    .await;
-    let status = d.resp.status().as_u16();
-    if status >= 400 {
-        return Err(format!("HTTP {status}"));
-    }
-    Ok(d.body.as_deref().and_then(chat_text_response))
+    .await?;
+    Ok(body
+        .as_deref()
+        .map(str::as_bytes)
+        .and_then(chat_text_response))
 }
 
 /// Send a text into a room: concurrent fanout to agent members (60s per

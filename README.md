@@ -34,10 +34,14 @@ tokens, a directory, live routing logs, and a live topology view in one binary.
   connections are peer-initiated — one open inbound port is enough.
 - **Directory as Agent Card** — `/.well-known/agent.json` (alias
   `agent-card.json`) lists accepted peers, auth-aware.
-- **Admin UI** — sidebar layout, dashboard with **live routing topology**
-  (requests animate as packets caller → gateway → destination), RED stats
-  (routed / errors / avg latency / pending), live communication log of every
-  routed request, pending-peer queue, routing log.
+- **Admin console** — a live single-page console (dark + light theme):
+  dashboard with **routing topology** (zoom/pan, animated packets, inline
+  approve), traffic charts with sparklines (1h/6h/24h), a **task inbox** that
+  tracks A2A task lifecycle and lets you answer `input-required` tasks or
+  cancel them, a **notification bell** (pending approvals, unreachable peers,
+  error spikes), the full audit log with cursor pagination and date ranges,
+  and a **messenger** for operator↔agent chat. Data flows over a JSON API
+  (`/api/*`) and one multiplexed SSE stream.
 - **Caller attribution** — optional `X-Gateway-Caller` header (advisory,
   display-only, stripped before forwarding) so the dashboard shows which peer
   made each call.
@@ -55,8 +59,9 @@ tokens, a directory, live routing logs, and a live topology view in one binary.
   rooms with roster notifications, emoji picker, per-node colors, live SSE
   appends. The gateway itself is an A2A agent (`/peer/gateway/`): message it
   with `/help`, `/peers`, `/rooms`, `/whoami`.
-- **Zero-dep runtime** — rust-embed bakes the UI in; single 7MB static binary,
-  no Node, no CDN, no database.
+- **Zero-dep runtime** — the built console is embedded via rust-embed; a
+  single static binary, no CDN, no database. (Node is only needed to build
+  the UI from source, not to run it.)
 
 ## Quickstart
 

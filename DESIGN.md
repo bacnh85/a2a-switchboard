@@ -1,6 +1,6 @@
 ---
 name: Switchboard Telemetry
-description: Light ops-console system for the a2a-switchboard admin UI — teal signal accent, zinc neutrals, data-is-mono discipline, de-carded flat surfaces.
+description: Dual-theme ops-console system for the a2a-switchboard admin UI — teal signal accent, zinc neutrals, data-is-mono discipline, flat surfaces; dark default, light companion.
 colors:
   primary: "#18181b"
   accent: "#115e59"
@@ -121,11 +121,13 @@ components:
 
 ## Overview
 
-Admin console for an A2A message switchboard: live routing topology, dense
-audit logs, peer registry, credential handling. Identity: **switchboard
-telemetry** — a calm light ops console where data is monospace and color is
-reserved for signal (state, health, errors). One accent, neutrals everywhere
-else. Separation by whitespace → background shift → elevation, in that order.
+Admin console for an A2A message switchboard: live routing topology, traffic
+charts, a task inbox, dense audit logs, peer registry, credential handling, a
+messenger, and a notification center. Identity: **switchboard telemetry** — a
+calm ops console where data is monospace and color is reserved for signal
+(state, health, errors). One accent, neutrals everywhere else. Separation by
+whitespace → background shift → elevation, in that order. Dark is the default
+theme; the light palette remains the reference for both.
 
 ## Colors
 
@@ -142,7 +144,15 @@ else. Separation by whitespace → background shift → elevation, in that order
   chat/messenger — a data-viz category palette (like chart series), NOT a
   second accent. Dark fg on light same-hue tint; stable per-node assignment
   by hash. Never used for buttons, links, or decoration outside chat.
-- No gradients. No glow. No dark mode (deliberate: light console identity).
+- **Dark theme (default)**: the same token names re-pointed — bg `#101013`,
+  surface `#17181c`, surface-2 `#1f2127`, border `#2a2d35`, text `#ececee`,
+  muted `#9ba0aa`; the accent brightens to teal-400 `#2dd4bf` (ink on accent
+  buttons flips to `#042f2e`), and ok/bad/warn become lighter signal colors
+  over 13% alpha tints. The chat identity palette switches to light text on
+  translucent same-hue tints. Charts re-point to the same accent/error vars.
+  Theme resolves at first paint (localStorage override, else
+  `prefers-color-scheme`); the toggle persists the choice. Rules are
+  theme-agnostic: one accent, neutrals elsewhere, color = signal.
 
 ## Typography
 

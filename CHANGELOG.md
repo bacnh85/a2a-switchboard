@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.8.0] - 2026-09-15
+
+### Added
+
+- **Console SPA**: the admin UI is rebuilt as a Preact + TypeScript single-page
+  app (Vite, compiled to static assets embedded in the binary). Dual theme —
+  dark (default follows the system) + light with a top-bar toggle. The Askama
+  templates, vendored JS, and the `askama` dependency are gone; the release
+  artifact is still a single self-contained binary. A Node toolchain is needed
+  only for development and CI.
+- **Dashboard analytics**: KPI tiles with 60-minute sparklines and a
+  routed/errors area chart with 1h/6h/24h windows (longer windows replay
+  `routing.jsonl`); KPIs resync from the server on an interval and on tab
+  focus, fixing the drift where live counters never corrected.
+- **Task inbox** (`/tasks`): A2A task lifecycle is derived from routed
+  `message/send` traffic (`result.status.state` / `result.id`, rpc-id
+  fallback), re-derived at boot from the audit trail. Active/closed views,
+  live state transitions over SSE, lifecycle timeline per task — and operator
+  intervention: **reply** to `input-required` tasks (delivered as a follow-up
+  `message/send` on the task's context, audited + chat-mirrored) and
+  **cancel** active tasks via `tasks/cancel`.
+- **Notification center**: top-bar bell with live alerts for pending
+  approvals, unreachable agents, tasks needing input, and error spikes — each
+  deep-linking to the right view.
+- **JSON API** under `/api/*` (summary, peers, logs with cursor pagination +
+  date range, tasks, notifications, settings, admission actions, JSON login).
+  The SPA consumes these; scripts can too.
+- **Chat upgrades**: page history beyond the in-memory window
+  (`/api/chat/history`), in-thread search, real typing indicator for human
+  DMs (SSE `chat_typing`), room management UI (create, edit roster, delete —
+  with roster notifications), and the identity picker now refreshes live
+  instead of being destructively replaced.
+- **Routing topology v2**: zoom (wheel) and pan (drag), full node names with
+  per-peer request counts, inline Accept/Reject on pending nodes, live packet
+  animation preserved.
+- Global SSE connection indicator, toasts for failed actions, loading/empty
+  states everywhere, `◈` favicon.
+
+### Changed
+
+- The console routes (`/`, `/peers`, `/tasks`, `/logs`, `/settings`, `/chat`,
+  `/login`) serve the SPA shell; every page/data interaction goes through the
+  JSON API (401 JSON under `/api/*`, HTML redirects elsewhere). Legacy form
+  POST endpoints remain for scripts; the no-JS fallback is gone.
+- `RouteEntry` (routing.jsonl) gains optional `task_id`/`context_id` fields —
+  serde-defaulted, old lines parse unchanged.
+
+### Fixed
+
+- Operator identity select is no longer destructively replaced when a human
+  identity is created in another tab (live refresh via SSE).
+- Dashboard KPI per-minute buckets no longer drop the newest minute's entries.
+
 ## [0.7.3] - 2026-09-12
 
 ### Changed

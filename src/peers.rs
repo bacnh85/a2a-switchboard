@@ -598,9 +598,9 @@ pub(crate) async fn deliver(
         .await
     };
 
-    let (task_state, resp_preview) = match &resp_bytes {
+    let (task_state, task_id, resp_preview) = match &resp_bytes {
         Some(b) => crate::state::audit_extract_response(b),
-        None => (None, None),
+        None => (None, None, None),
     };
     app.log_route(crate::state::RouteEntry {
         ts: now(),
@@ -615,6 +615,8 @@ pub(crate) async fn deliver(
         preview: audit.preview,
         resp_preview,
         task_state,
+        task_id,
+        context_id: audit.context_id,
     })
     .await;
     record_chat_roundtrip(

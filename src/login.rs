@@ -1,59 +1,82 @@
 use crate::state::AppState;
-use askama::Template;
 use axum::extract::{Form, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::Json;
 use serde::Deserialize;
 
 pub const COOKIE: &str = "agw_session";
-
-#[derive(Template)]
-#[template(path = "login.html")]
-pub struct LoginTmpl {
-    pub error: String,
-}
-
-fn login_error(msg: &str) -> Response {
-    Html(
-        LoginTmpl {
-            error: msg.to_string(),
-        }
-        .render()
-        .unwrap_or_default(),
-    )
-    .into_response()
-}
-
-pub async fn login_page() -> Response {
-    Html(
-        LoginTmpl {
-            error: String::new(),
-        }
-        .render()
-        .unwrap_or_default(),
-    )
-    .into_response()
-}
 
 #[derive(Deserialize)]
 pub struct LoginForm {
     pub password: String,
 }
 
+/// Legacy form sign-in (the SPA posts JSON to /api/login; kept for scripts).
 pub async fn login(
     State(app): State<AppState>,
     crate::auth::ClientIp(ip): crate::auth::ClientIp,
     Form(f): Form<LoginForm>,
 ) -> Response {
     if !app.limiter.allow(&format!("login-{ip}"), 5) {
-        return login_error("too many attempts, wait a minute");
+        return Redirect::to("/login?error=rate").into_response();
     }
     if !app.verify_admin_password(&f.password).await {
-        return login_error("wrong password");
+        return Redirect::to("/login?error=wrong").into_response();
     }
     let token = app.create_session();
     session_response(Redirect::to("/"), token)
+}
+
+#[derive(Deserialize)]
+pub struct JsonLogin {
+    pub password: String,
+}
+
+/// GET /api/auth/ok — session probe for the SPA: 200 with instance info when
+/// the session is valid (or no password is set), 401 otherwise.
+pub async fn auth_ok(State(app): State<AppState>) -> Response {
+    Json(serde_json::json!({
+        "ok": true,
+        "password_set": app.admin_set().await,
+        "localhost": crate::admin::is_localhost(),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+    .into_response()
+}
+
+/// POST /api/login {password} — JSON sign-in for the SPA (same rate limit
+/// and argon2 verification as the form flow).
+pub async fn api_login(
+    State(app): State<AppState>,
+    crate::auth::ClientIp(ip): crate::auth::ClientIp,
+    Json(f): Json<JsonLogin>,
+) -> Response {
+    if !app.limiter.allow(&format!("login-{ip}"), 5) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "too many attempts, wait a minute"})),
+        )
+            .into_response();
+    }
+    if !app.verify_admin_password(&f.password).await {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "wrong password"})),
+        )
+            .into_response();
+    }
+    let token = app.create_session();
+    session_response(Json(serde_json::json!({"ok": true})), token)
+}
+
+/// POST /api/logout — drop the session (JSON flavor).
+pub async fn api_logout(State(app): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(t) = session_token(&headers) {
+        app.drop_session(&t);
+    }
+    clear_session(Json(serde_json::json!({"ok": true})))
 }
 
 pub async fn logout(State(app): State<AppState>, headers: HeaderMap) -> Response {
