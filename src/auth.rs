@@ -45,14 +45,24 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
     {
-        if let Some(t) = v.strip_prefix("Bearer ") {
-            return Some(t.trim().to_string());
+        // RFC 7235: the auth-scheme is case-insensitive. A Bearer scheme with
+        // an empty token yields None — a "" credential must never classify
+        // (empty Persisted token fields would otherwise match trivially).
+        let mut parts = v.split_whitespace();
+        if parts.next().is_some_and(|s| s.eq_ignore_ascii_case("bearer")) {
+            return parts
+                .next()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
         }
     }
     headers
         .get("x-gateway-token")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 pub fn ct_eq(a: &str, b: &str) -> bool {
@@ -96,5 +106,9 @@ pub fn forbidden() -> Response {
 }
 
 pub fn too_many() -> Response {
-    rpc_err(StatusCode::TOO_MANY_REQUESTS, -32003, "rate limit exceeded")
+    let mut res = rpc_err(StatusCode::TOO_MANY_REQUESTS, -32003, "rate limit exceeded");
+    // Fixed 60s window — tell well-behaved clients (pi-a2a, hermes) when to retry.
+    res.headers_mut()
+        .insert(header::RETRY_AFTER, axum::http::HeaderValue::from_static("60"));
+    res
 }

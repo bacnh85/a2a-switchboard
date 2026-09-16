@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.8.1] - 2026-09-16
+
+### Fixed
+
+- Channel-mode peers (reverse channel, e.g. pi-a2a) rejected every proxied
+  call with 401: the envelope carried no credential because the channel path
+  never substituted the peer's registered `upstream_token` (the direct HTTP
+  path did). The envelope now carries
+  `authorization: Bearer <upstream_token>`.
+- 429 responses now carry `Retry-After: 60` so well-behaved clients back off
+  instead of keeping the fixed-window `/register` budget saturated.
+- Token extraction hardened: the auth scheme is case-insensitive (RFC 7235)
+  and empty bearer / X-Gateway-Token credentials are treated as absent (401),
+  so an empty stored token can never classify as a valid credential.
+
 ## [0.8.0] - 2026-09-15
 
 ### Added

@@ -365,7 +365,7 @@ async fn channel_roundtrip_full() {
     // Register a peer with an UNROUTABLE url — proves the channel path, not
     // direct HTTP, carries the request.
     let (router, app, _gw, boot) = test_app().await;
-    let reg = r#"{"name":"fw","url":"http://127.0.0.1:1/"}"#.to_string();
+    let reg = r#"{"name":"fw","url":"http://127.0.0.1:1/","upstream_token":"ut-fw-secret"}"#.to_string();
     let r = router
         .clone()
         .oneshot(req("POST", "/register", Some(&boot), Some(&reg)))
@@ -428,6 +428,10 @@ async fn channel_roundtrip_full() {
     let env = env.expect("request envelope not delivered");
     let id = env["id"].as_u64().unwrap();
     let secret = env["chan_secret"].as_str().unwrap().to_string();
+    assert_eq!(
+        env["headers"]["authorization"], "Bearer ut-fw-secret",
+        "channel envelope must carry the peer's upstream_token"
+    );
     assert_eq!(env["method"], "POST");
     let body_in = decode(env["body_b64"].as_str().unwrap());
     assert!(body_in.contains("message/send"));
@@ -708,6 +712,7 @@ async fn bad_urls_rejected() {
 async fn rate_limited_registration() {
     let (router, _app, gw, _boot) = test_app().await;
     let mut last = StatusCode::OK;
+    let mut retry_after = None;
     for i in 0..25 {
         let r = router
             .clone()
@@ -720,8 +725,54 @@ async fn rate_limited_registration() {
             .await
             .unwrap();
         last = r.status();
+        retry_after = r.headers().get("retry-after").cloned();
     }
     assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        retry_after.as_ref().map(|v| v.to_str().unwrap()),
+        Some("60"),
+        "429 must carry Retry-After so clients can back off"
+    );
+}
+
+#[tokio::test]
+async fn bearer_scheme_is_case_insensitive_and_empty_tokens_are_absent() {
+    let (router, _app, gw, _boot) = test_app().await;
+    let body = r#"{"name":"tok-edge","url":"http://127.0.0.1:1/"}"#;
+
+    // Non-canonical scheme casing extracts the same token → not a 401.
+    let r = router
+        .clone()
+        .oneshot(
+            req("POST", "/register", None, Some(body))
+                .with_header("authorization", &format!("bEaReR {gw}")),
+        )
+        .await
+        .unwrap();
+    assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
+
+    // `Authorization: Bearer ` (empty token) → treated as absent → 401, even
+    // though a stored token could theoretically be "".
+    let r = router
+        .clone()
+        .oneshot(
+            req("POST", "/register", None, Some(body))
+                .with_header("authorization", "Bearer "),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    // Empty X-Gateway-Token (whitespace only) → absent → 401.
+    let r = router
+        .clone()
+        .oneshot(
+            req("POST", "/register", None, Some(body))
+                .with_header("x-gateway-token", "  "),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ----- admin auth -----

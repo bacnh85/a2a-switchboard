@@ -581,7 +581,17 @@ pub(crate) async fn deliver(
     let started = std::time::Instant::now();
 
     let (status, resp, resp_bytes) = if via_channel {
-        channel_exchange(app, name, path, query, method, headers, body.clone()).await
+        channel_exchange(
+            app,
+            name,
+            upstream_token.clone(),
+            path,
+            query,
+            method,
+            headers,
+            body.clone(),
+        )
+        .await
     } else {
         direct_exchange(
             app,
@@ -755,6 +765,7 @@ async fn direct_exchange(
 async fn channel_exchange(
     app: &AppState,
     name: &str,
+    upstream_token: Option<String>,
     path: &str,
     query: Option<String>,
     method: &str,
@@ -780,6 +791,13 @@ async fn channel_exchange(
         if let Ok(vs) = v.to_str() {
             fwd.insert(lower, vs.to_string());
         }
+    }
+    // Substitute the peer's registered upstream_token, mirroring the direct
+    // HTTP path (direct_exchange: `req.bearer_auth(ut)`). Without this the
+    // channel envelope carries no credential and token-guarded peers (e.g.
+    // pi-a2a) reject every proxied call with 401.
+    if let Some(ut) = upstream_token {
+        fwd.insert("authorization".to_string(), format!("Bearer {ut}"));
     }
     let head = crate::channel::EnvelopeHead {
         method: method.to_string(),
